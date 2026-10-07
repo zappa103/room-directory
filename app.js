@@ -12,7 +12,7 @@
       ['Seating Capacity', 'text'], ['Square Footage', 'text'], ['Seating Configuration', 'text'], ['Floor Type', 'text'],
       ['PC Port', 'text'], ['AV Port', 'text'], ['Notes', 'area']]],
     ['Status', [['CTL Supported', ['Yes', 'No']], ['Record Type', ['CTL Supported', 'CTL Updated', 'Contact Info Only']],
-      ['Equipment Info As Of', 'text'], ['Latest Update', 'text'], ['Planned Update Year', 'text'], ['Funding Status', ['Funding Requested', 'Funding Approved']], ['Funding Source', ['STF', 'Client Funded']], ['Photos URL', 'text', 'Photos link (view only, public)'], ['Photos Upload URL', 'text', 'Photos link (can edit, for adding photos)'], ['GVE Room ID', 'text']]],
+      ['Equipment Info As Of', 'text'], ['Latest Update', 'text'], ['Planned Update Year', 'text'], ['Funding Status', ['Funding Requested', 'Funding Approved']], ['Funding Source', ['STF', 'Client Funded']], ['Refresh Plan', ["Won't be updated"]], ['Photos URL', 'text', 'Photos link (view only, public)'], ['Photos Upload URL', 'text', 'Photos link (can edit, for adding photos)'], ['GVE Room ID', 'text']]],
   ];
   const CONTACTS = [
     ['AV Support', 'AV Support Contact', 'AV Support Email', 'AV Support Phone'],
@@ -23,7 +23,7 @@
     'Lavalier Mic', 'Handheld Mic', 'Mic Receiver', 'Document Camera', 'Blu-ray / DVD Player', 'Amplifier', 'Speaker',
     'Power Conditioner', 'HDMI Extender', 'Video Conferencing'];
 
-  const S = { zones: [], user: null, role: null, token: null, rooms: [], equipment: [], catalog: [], users: null,
+  const S = { projects: [], pj: { view: 'board', q: '', mode: 'stf', fy: '', fund: '', phase: '' }, lists: {}, showArchived: false, catCatOpen: new Set(), zones: [], user: null, role: null, token: null, rooms: [], equipment: [], catalog: [], users: null,
     page: 'rooms', q: '', building: '', ctlOnly: false, limit: 120, open: null, tab: null,
     catOpen: new Set(), catEditing: null, catAdding: null, addingRoom: false };
 
@@ -33,6 +33,10 @@
   const esc = v => String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const has = v => v !== undefined && v !== null && String(v).trim() !== '';
   const canEdit = () => EDIT_ROLES.includes(S.role);
+  const canView = () => ['Viewer', 'Technician', 'Admin'].includes(S.role);   // Viewer = non-CTL UGA staff, read-only
+  const roleLabel = r => r === 'Viewer' ? 'UGA Viewer' : r;
+  const isArchived = r => String(r.Archived || '').trim().toLowerCase() === 'yes';
+  const LIST_FIELDS = ['Department', 'College', 'Primary Support Unit'];
   const isContactOnly = r => r['Record Type'] === 'Contact Info Only';
   const isCTL = r => String(r['CTL Supported']).toLowerCase() === 'yes' || r['Record Type'] === 'CTL Supported';
   const roomName = r => `${r.Building} ${r.Room}`;
@@ -49,6 +53,8 @@
   }
   // A room with a planned update this year or later (funding requested/approved) is pending, not overdue.
   function plannedYear(r) { const y = asOfYear(r['Planned Update Year']); return y && y >= new Date().getFullYear() ? y : null; }
+  // "Won't be updated" takes a room off the lifecycle refresh list for good (until the field is cleared).
+  const wontUpdate = r => has(r['Refresh Plan']);
   function plannedText(r) {
     const y = plannedYear(r); if (!y) return '';
     const bits = [r['Funding Source'], has(r['Funding Status']) ? String(r['Funding Status']).toLowerCase() : ''].filter(has);
@@ -93,12 +99,13 @@
     try {
       const d = await api('session');
       S.user = d.user; S.role = d.user.role; S.rooms = d.rooms; S.equipment = d.equipment || []; S.catalog = d.catalog || []; S.zones = d.zones || [];
-      toast(`Signed in as ${S.user.name} (${S.role})`);
+      S.lists = d.lists || {}; S.projects = d.projects || [];
+      toast(`Signed in as ${S.user.name} (${roleLabel(S.role)})`);
     } catch (e) { toast(e.message, true); }
     renderAll();
   }
   function signOut(silent) {
-    S.user = null; S.role = null; S.token = null; S.equipment = []; S.catalog = []; S.users = null; S.page = 'rooms';
+    S.user = null; S.role = null; S.token = null; S.equipment = []; S.catalog = []; S.projects = []; S.users = null; S.page = 'rooms';
     try { sessionStorage.removeItem('idToken'); } catch (e) {}
     if (window.google && google.accounts) google.accounts.id.disableAutoSelect();
     if (!silent) loadPublic();
@@ -113,7 +120,7 @@
   function renderAccount() {
     const el = $('#account');
     if (S.user) {
-      el.innerHTML = `<span class="user-chip">${esc(S.user.name)} <span class="role-pill">${esc(S.role)}</span></span>
+      el.innerHTML = `<span class="user-chip">${esc(S.user.name)} <span class="role-pill">${esc(roleLabel(S.role))}</span></span>
         ${DEMO ? '' : '<button class="link-btn" id="signout">Sign out</button>'}`;
       if (!DEMO) $('#signout').onclick = () => { signOut(); toast('Signed out'); };
     } else if (DEMO) {
@@ -124,34 +131,42 @@
     }
     const tabs = $('#page-tabs');
     const pages = [['rooms', 'Rooms']];
-    if (canEdit()) pages.push(['catalog', 'Equipment Catalog'], ['reports', 'Reports'], ['zones', 'Zones']);
-    if (S.role === 'Admin') pages.push(['users', 'Users']);
+    if (canEdit()) pages.push(['projects', 'Projects'], ['manage', 'Manage']);
     tabs.hidden = pages.length < 2;
-    tabs.innerHTML = pages.map(([k, l]) => `<button class="page-tab ${S.page === k ? 'active' : ''}" data-page="${k}">${l}</button>`).join('');
-    $$('.page-tab', tabs).forEach(b => b.onclick = () => { S.page = b.dataset.page; renderAll(); });
+    const active = MANAGE_PAGES.includes(S.page) ? 'manage' : S.page;
+    tabs.innerHTML = pages.map(([k, l]) => `<button class="page-tab ${active === k ? 'active' : ''}" data-page="${k}">${l}</button>`).join('');
+    $$('.page-tab', tabs).forEach(b => b.onclick = () => { S.page = b.dataset.page === 'manage' ? (S.manageLast || 'catalog') : b.dataset.page; if (b.dataset.page === 'projects') S.pj.view = 'board'; renderAll(); });
   }
   function renderDemoBar() {
     const bar = $('#demo-bar');
     if (!DEMO) { bar.hidden = true; return; }
     bar.hidden = false;
     bar.innerHTML = `<strong>Demo mode</strong><span>Sample data only. Nothing is saved. View as</span>
-      <select id="demo-role" aria-label="View as role">${['Public', 'Student', 'Technician', 'Admin'].map(r =>
-        `<option ${((S.role || 'Public') === r) ? 'selected' : ''}>${r}</option>`).join('')}</select>`;
+      <select id="demo-role" aria-label="View as role">${[['Public', 'Public'], ['Student', 'Student'], ['Viewer', 'UGA Viewer (view only)'], ['Technician', 'Technician'], ['Admin', 'Admin']].map(([v, l]) =>
+        `<option value="${v}" ${((S.role || 'Public') === v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
     $('#demo-role').onchange = async e => {
       const r = e.target.value;
       if (r === 'Public') { S.user = null; S.role = null; S.page = 'rooms'; await loadPublic(); }
       else { S.role = r; S.user = { name: 'Demo ' + r, email: 'demo@example.com', role: r }; if (!canEdit() && S.page !== 'rooms') S.page = 'rooms'; await loadSession(); }
     };
   }
+  // "Manage" groups the staff tools under one top tab, with its own sub-tabs.
+  const MANAGE_PAGES = ['catalog', 'reports', 'zones', 'users'];
+  function renderManage() {
+    S.manageLast = S.page;
+    const subs = [['catalog', 'Equipment Catalog'], ['reports', 'Reports'], ['zones', 'Zones']].concat(S.role === 'Admin' ? [['users', 'Users']] : []);
+    $('#main').innerHTML = `<div class="seg sub-nav" role="tablist">${subs.map(([k, l]) => `<button class="seg-btn ${S.page === k ? 'active' : ''}" data-sub="${k}">${l}</button>`).join('')}</div><div id="mg-body"></div>`;
+    $$('[data-sub]').forEach(b => b.onclick = () => { S.page = b.dataset.sub; renderAll(); });
+    ({ catalog: renderCatalog, reports: renderReports, zones: renderZones, users: renderUsers })[S.page]();
+  }
+  const subHost = () => $('#mg-body') || $('#main');
   function renderAll() {
     $('#site-title').textContent = CFG.SITE_TITLE || 'Campus Room Directory';
     $('#site-sub').textContent = CFG.SITE_SUBTITLE || '';
     document.title = CFG.SITE_TITLE || 'Campus Room Directory';
     renderAccount(); renderDemoBar();
-    if (S.page === 'catalog' && canEdit()) renderCatalog();
-    else if (S.page === 'reports' && canEdit()) renderReports();
-    else if (S.page === 'zones' && canEdit()) renderZones();
-    else if (S.page === 'users' && S.role === 'Admin') renderUsers();
+    if (S.page === 'projects' && canEdit()) renderProjects();
+    else if (MANAGE_PAGES.includes(S.page) && canEdit() && (S.page !== 'users' || S.role === 'Admin')) renderManage();
     else { S.page = 'rooms'; renderRooms(); }
     if (S.open) renderPanel();
   }
@@ -159,8 +174,9 @@
   // ------------------------------------------------------------------ rooms page
   function filteredRooms() {
     const q = S.q.trim().toLowerCase();
-    const eqByRoom = canEdit() ? equipIndex() : {};
+    const eqByRoom = canView() ? equipIndex() : {};
     return S.rooms.filter(r => {
+      if (isArchived(r) && !S.showArchived && !q) return false; // archived rooms still show up when searching
       if (S.building && r.Building !== S.building) return false;
       if (S.ctlOnly && !isCTL(r)) return false;
       if (!q) return true;
@@ -176,11 +192,14 @@
     const buildings = Array.from(new Set(S.rooms.map(r => r.Building))).sort(cmp);
     const main = $('#main');
     main.innerHTML = `
+      <div class="search-row">
+        <input class="search" id="q" type="search" placeholder="Search building, room${canView() ? ', equipment' : ''}${S.role ? ', contact' : ''}…" value="${esc(S.q)}" aria-label="Search">
+      </div>
       <div class="controls">
-        <input class="search" id="q" type="search" placeholder="Search building, room${canEdit() ? ', equipment' : ''}${S.role ? ', contact' : ''}…" value="${esc(S.q)}" aria-label="Search">
         <select class="dd" id="dd-building" aria-label="Building"><option value="">All buildings</option>${buildings.map(b => `<option ${b === S.building ? 'selected' : ''}>${esc(b)}</option>`).join('')}</select>
         <select class="dd" id="dd-room" aria-label="Room"><option value="">Jump to room…</option></select>
         <button class="chip ${S.ctlOnly ? 'active' : ''}" id="ctl-only">CTL-supported only</button>
+        ${S.role ? `<label class="switch"><input type="checkbox" id="show-arch" ${S.showArchived ? 'checked' : ''}><span class="track" aria-hidden="true"></span>Show archived rooms</label>` : ''}
         ${S.role === 'Admin' ? '<button class="btn" id="add-room">+ Add room</button>' : ''}
         <span class="count" id="count"></span>
       </div>
@@ -191,12 +210,13 @@
     $('#dd-building').onchange = e => { S.building = e.target.value; S.limit = 120; fillRoomDD(); drawGrid(); };
     $('#dd-room').onchange = e => { const r = S.rooms.find(x => x.RoomID === e.target.value); if (r) openRoom(r); e.target.value = ''; };
     $('#ctl-only').onclick = () => { S.ctlOnly = !S.ctlOnly; renderRooms(); };
+    if ($('#show-arch')) $('#show-arch').onchange = e => { S.showArchived = e.target.checked; S.limit = 120; fillRoomDD(); drawGrid(); };
     if ($('#add-room')) $('#add-room').onclick = () => { S.addingRoom = !S.addingRoom; drawAddRoom(); };
     fillRoomDD(); drawAddRoom(); drawGrid();
   }
   function fillRoomDD() {
     const dd = $('#dd-room'); if (!dd) return;
-    const list = S.rooms.filter(r => !S.building || r.Building === S.building).sort((a, b) => cmp(a.Building, b.Building) || cmp(a.Room, b.Room));
+    const list = S.rooms.filter(r => (!S.building || r.Building === S.building) && (S.showArchived || !isArchived(r))).sort((a, b) => cmp(a.Building, b.Building) || cmp(a.Room, b.Room));
     dd.innerHTML = '<option value="">Jump to room…</option>' + list.map(r => `<option value="${esc(r.RoomID)}">${esc(S.building ? r.Room : roomName(r))}</option>`).join('');
   }
   function drawGrid() {
@@ -211,9 +231,9 @@
         if (has(r['AV Support Contact'])) lines.push(`<div><b>AV:</b> ${esc(r['AV Support Contact'])}</div>`);
         if (has(r['Computer Support Contact'])) lines.push(`<div><b>Computer:</b> ${esc(r['Computer Support Contact'])}</div>`);
       } else if (has(r.Department)) lines.push(`<div><b>Department:</b> ${esc(r.Department)}</div>`);
-      return `<button class="plaque ${isContactOnly(r) ? 'contact-only' : ''}" data-id="${esc(r.RoomID)}">
+      return `<button class="plaque ${isContactOnly(r) ? 'contact-only' : ''} ${isArchived(r) ? 'archived' : ''}" data-id="${esc(r.RoomID)}">
         <div class="idline">${esc(r.Building)}<br>${esc(r.Room)}</div>
-        <div class="tags">${isCTL(r) ? `<span class="tag ctl">${CHECK}CTL</span>` : '<span class="tag nonctl">Non-CTL</span>'}</div>
+        <div class="tags">${isCTL(r) ? `<span class="tag ctl">${CHECK}CTL</span>` : '<span class="tag nonctl">Non-CTL</span>'}${isArchived(r) ? '<span class="tag arch">Archived</span>' : ''}${canEdit() ? (p => p ? `<span class="tag proj">${esc(p.Phase)}</span>` : '')(projectsFor(r.RoomID).filter(isOpenProject).sort((a, b) => PHASES.indexOf(b.Phase) - PHASES.indexOf(a.Phase))[0]) : ''}</div>
         <div class="lines">${lines.join('')}</div></button>`;
     }).join('');
     $$('.plaque', grid).forEach(b => b.onclick = () => openRoom(S.rooms.find(r => r.RoomID === b.dataset.id)));
@@ -247,7 +267,7 @@
   function openRoom(r) {
     if (!r) return;
     S.open = r.RoomID;
-    S.tab = canEdit() ? 'main' : (S.role ? 'contacts' : 'info');
+    S.tab = canView() ? 'main' : (S.role ? 'contacts' : 'info');
     S.confirmRemove = false; S.editField = null; S.eqEdit = null; S.eqAdding = false; S.history = null;
     renderPanel();
   }
@@ -259,7 +279,7 @@
     const old = $('.panel'); const keep = old && S.lastPanel === S.open + '|' + S.tab ? old.scrollTop : 0;
     S.lastPanel = S.open + '|' + S.tab;
     const restore = () => { const p = $('.panel'); if (p) p.scrollTop = keep; };
-    const tabs = canEdit() ? [['main', 'Room & support contacts'], ['equipment', 'Equipment'], ['history', 'History']]
+    const tabs = canView() ? [['main', 'Room & support contacts'], ['equipment', 'Equipment'], ['history', 'History']]
       : S.role ? [['contacts', 'Support contacts'], ['info', 'Room']] : [];
     const photo = (has(r['Photos URL']) ? `<a class="photo-btn" href="${esc(r['Photos URL'])}" target="_blank" rel="noopener">View photos ↗</a>` : '') +
       (canEdit() && has(r['Photos Upload URL']) ? `<a class="photo-btn add" href="${esc(r['Photos Upload URL'])}" target="_blank" rel="noopener" title="Opens the room's OneDrive folder. Use Upload there to take or add photos.">Add photos ↗</a>` : '');
@@ -280,8 +300,9 @@
     $$('.tab').forEach(t => t.onclick = () => { S.tab = t.dataset.tab; S.editField = null; S.eqEdit = null; S.eqAdding = false; renderPanel(); });
     const body = $('#pbody'), foot = $('#pfoot');
     if (S.tab === 'info' || !S.role) { body.innerHTML = infoHtml(r) + (has(r['Photos URL']) ? '' : '<div class="note">No photos linked for this room yet.</div>'); return; }
-    if (S.tab === 'contacts') { body.innerHTML = contactsHtml(r); return; }
-    if (S.tab === 'main') { body.innerHTML = contactsEditHtml(r) + roomEditHtml(r); foot.innerHTML = roomFoot(); wireFieldEdits(r); wireRoomFoot(r); restore(); return; }
+    if (S.tab === 'contacts') { body.innerHTML = (isArchived(r) ? '<div class="note arch"><div><b>Archived room</b></div></div>' : '') + contactsHtml(r); return; }
+    const archNote = isArchived(r) ? '<div class="note arch"><div><b>Archived room</b>Hidden from the room list unless "Show archived rooms" is on, and never shown to the public.</div></div>' : '';
+    if (S.tab === 'main') { body.innerHTML = archNote + roomProjectsHtml(r) + contactsEditHtml(r) + roomEditHtml(r); wireProjectLinks(body); foot.innerHTML = canEdit() || S.role === 'Admin' ? roomFoot() : ''; wireFieldEdits(r); if (foot.innerHTML) wireRoomFoot(r); restore(); return; }
     if (S.tab === 'equipment') { renderEquipmentTab(r); restore(); return; }
     if (S.tab === 'equipment') { renderEquipmentTab(r); return; }
     if (S.tab === 'history') { renderHistory(r); return; }
@@ -310,14 +331,14 @@
     if (!has(z.name)) return editing ? `<div class="contact"><div class="role">${label}</div><div class="line">No CTL technician for this room's zone${has(r.Zone) ? ' (' + esc(r.Zone) + ')' : ''}. Set the zone below, or add the zone on the Zones page.</div></div>` : '';
     const backup = has(z.bName) ? `<div class="backup">If ${esc(String(z.name).split(' ')[0])} is unavailable, call ${esc(z.bName)} (${esc(z.bZone)} zone)${has(z.bPhone) ? ' · ' + esc(z.bPhone) : ''}</div>` : '';
     return `<div class="contact ctl-contact"><div class="role">${label}${has(r.Zone) ? ' · ' + esc(r.Zone) + ' zone' : ''}</div><div class="name">${esc(z.name)}</div>${contactLine(z.email, 'email')}${contactLine(z.phone)}${backup}
-      ${editing ? '<div class="line" style="opacity:.6;font-size:11.5px;margin-top:6px">Comes from the room\'s zone. Change technicians on the Zones page.</div>' : ''}</div>`;
+      ${editing && canEdit() ? '<div class="line" style="opacity:.6;font-size:11.5px;margin-top:6px">Comes from the room\'s zone. Change technicians on the Zones page.</div>' : ''}</div>`;
   }
   function contactsHtml(r) {
     let html = '<div class="section-title">Support contacts</div>';
     let any = false;
     const ctl = ctlCard(r, false);
     const dept = [['Department', r.Department], ['College', r.College], ['Primary support unit', r['Primary Support Unit']]].filter(x => has(x[1]));
-    if (dept.length) html += `<div class="contact"><div class="role">Department</div>${dept.map(([k, v]) => `<div class="line"><span style="opacity:.65">${k}:</span> ${esc(v)}</div>`).join('')}</div>`;
+    if (dept.length) html += `<div class="contact"><div class="role">Department</div>${dept.map(([k, v]) => `<div class="kv"><span class="kv-k">${k}</span><span class="kv-v">${esc(v)}</span></div>`).join('')}</div>`;
     if (ctl && isCTL(r)) { any = true; html += ctl; }
     CONTACTS.forEach(([label, n, e, p]) => {
       if (!has(r[n]) && !has(r[e]) && !has(r[p])) return;
@@ -333,19 +354,25 @@
     const id = 'f-' + field.replace(/\W+/g, '-');
     if (Array.isArray(kind)) return `<select id="${id}" data-field="${esc(field)}"><option value=""></option>${kind.map(o => `<option ${String(val) === o ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
     if (kind === 'area') return `<textarea id="${id}" data-field="${esc(field)}">${esc(val)}</textarea>`;
+    if (kind === 'list') {
+      const opts = (S.lists[field] || []).slice(); if (has(val) && !opts.includes(String(val))) opts.unshift(String(val));
+      return `<select id="${id}" data-field="${esc(field)}" data-list="1"><option value=""></option>${opts.map(o => `<option ${String(val) === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}
+        ${S.role === 'Admin' ? '<option value="__new__">+ Add a new name…</option>' : ''}</select>`;
+    }
     return `<input id="${id}" data-field="${esc(field)}" value="${esc(val)}" placeholder="—">`;
   }
   // Read-only rows with an Edit button; only the field being edited becomes an input.
   function fieldRow(r, field, label, kind) {
     const v = r[field];
     if (kind === 'locked') return `<div class="row"><span class="k">${esc(label)}</span><span class="v ${has(v) ? '' : 'none'}">${has(v) ? esc(v) : 'Not recorded'}</span><span class="lock-note" title="To change this, add a new room">Fixed</span></div>`;
-    if (S.editField === field) {
+    if (LIST_FIELDS.includes(field) && kind !== 'locked') kind = 'list';
+    if (S.editField === field && canEdit()) {
       return `<div class="row editing"><span class="k">${esc(label)}</span><span class="edit-wrap">${input(field, v, kind)}
         <button class="btn primary small" data-fsave="${esc(field)}">Save</button><button class="btn small" data-fcancel>Cancel</button></span></div>`;
     }
     const shown = !has(v) ? 'Not recorded' : (field === 'Photos URL' || field === 'Photos Upload URL' || field === 'Help / Ticket Website') ? `<a href="${esc(v)}" target="_blank" rel="noopener">${esc(v)}</a>` : esc(v);
     return `<div class="row"><span class="k">${esc(label)}</span><span class="v ${has(v) ? '' : 'none'}">${shown}</span>
-      <button class="edit-btn" data-fedit="${esc(field)}" aria-label="Edit ${esc(label)}">Edit</button></div>`;
+      ${canEdit() ? `<button class="edit-btn" data-fedit="${esc(field)}" aria-label="Edit ${esc(label)}">Edit</button>` : ''}</div>`;
   }
   function contactsEditHtml(r) {
     let html = '<div class="section-title">Support contacts</div>';
@@ -368,21 +395,32 @@
     const save = async () => {
       const el = $('#pbody .editing [data-field]'); if (!el) return;
       const f = el.dataset.field, v = el.value.trim();
+      if (v === '__new__') { toast('Type the new name first', true); return; }
       if (String(r[f] == null ? '' : r[f]) === v) { cancel(); return; }
       try {
         const d = await api('saveRoom', { roomId: r.RoomID, changes: { [f]: v } });
-        Object.assign(r, d.room); S.editField = null; toast(`${f} saved`); renderAll();
+        Object.assign(r, d.room); if (d.lists) S.lists = d.lists; S.editField = null; toast(`${f} saved`); renderAll();
       } catch (e) { toast(e.message, true); }
     };
     $$('#pbody [data-fcancel]').forEach(b => b.onclick = cancel);
     $$('#pbody [data-fsave]').forEach(b => b.onclick = save);
     const el = $('#pbody .editing [data-field]');
+    if (el && el.dataset.list) el.onchange = () => {
+      if (el.value !== '__new__') return;
+      const f = el.dataset.field;
+      el.outerHTML = `<input id="${el.id}" data-field="${esc(f)}" placeholder="New ${esc(f)} name">`;
+      const ni = $('#' + el.id); ni.focus();
+      ni.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); save(); } if (e.key === 'Escape') { e.stopPropagation(); cancel(); } };
+    };
     if (el) el.onkeydown = e => { if (e.key === 'Enter' && el.tagName !== 'TEXTAREA') { e.preventDefault(); save(); } if (e.key === 'Escape') { e.stopPropagation(); cancel(); } };
   }
   function roomFoot() {
-    if (S.confirmRemove) return `<div class="save-bar"><div class="confirm">Remove this room from the directory? It moves to the Removed Rooms tab.
-      <button class="btn danger small" id="rm-yes">Remove room</button><button class="btn small" id="rm-no">Keep it</button></div></div>`;
-    return `<div class="save-bar"><button class="btn danger small" id="rm">Remove room</button><span style="font-size:12px;opacity:.65;align-self:center">Click Edit next to a field to change it. Each change saves on its own.</span></div>`;
+    if (S.confirmRemove) return `<div class="save-bar"><div class="confirm warn-box"><b>Remove this room permanently?</b> This can't be undone from the website. If you only want to hide it, use Archive instead.
+      <span style="display:flex;gap:8px;margin-top:8px"><button class="btn danger small" id="rm-yes">Yes, remove permanently</button><button class="btn small" id="rm-no">Cancel</button></span></div></div>`;
+    const r = currentRoom();
+    return `<div class="save-bar"><span style="display:flex;gap:8px;flex-wrap:wrap">${canEdit() ? '<button class="btn danger small" id="rm">Remove room</button>' : ''}
+      ${S.role === 'Admin' ? `<button class="btn small" id="arch">${isArchived(r) ? 'Unarchive room' : 'Archive room'}</button>` : ''}</span>
+      <span style="font-size:12px;opacity:.65;align-self:center">Click Edit next to a field to change it. Each change saves on its own.</span></div>`;
   }
   function wireRoomFoot(r) {
     if (S.confirmRemove) {
@@ -393,7 +431,11 @@
       };
       return;
     }
-    $('#rm').onclick = () => { S.confirmRemove = true; renderPanel(); };
+    if ($('#rm')) $('#rm').onclick = () => { S.confirmRemove = true; renderPanel(); };
+    if ($('#arch')) $('#arch').onclick = async () => {
+      try { const d = await api('archiveRoom', { roomId: r.RoomID, archived: !isArchived(r) }); Object.assign(r, d.room); toast(isArchived(r) ? 'Room archived' : 'Room unarchived'); renderAll(); }
+      catch (e) { toast(e.message, true); }
+    };
   }
 
   // equipment tab: read-only list, Edit per item, "+ Add equipment" opens a form
@@ -412,6 +454,9 @@
     let html = '';
     if (isStale(r)) html += `<div class="note stale"><div><b>Equipment information as of ${esc(r['Equipment Info As Of'])}</b>CTL's last install or update in this room was more than ${STALE} years ago. This list may not match what is in the room now.${plannedYear(r) ? ' ' + esc(plannedText(r)) + '.' : ''}</div></div>`;
     else if (plannedYear(r)) html += `<div class="note"><div><b>${esc(plannedText(r))}</b></div></div>`;
+    const cp = canEdit() ? committedProject(r) : null;
+    if (cp) html += `<div class="note"><div><b>Project: ${esc(cp.Phase)}${has(cp['STF Year']) ? ' (' + esc(cp['STF Year']) + ')' : ''}</b><button class="model-link" data-project="${esc(cp.ProjectID)}">${esc(cp.Title)}</button> ${ticketLink(cp)}</div></div>`;
+    if (wontUpdate(r)) html += `<div class="note"><div><b>Won't be updated</b>This room is left off the lifecycle refresh list.</div></div>`;
     if (isContactOnly(r)) html += '<div class="note"><div><b>Contact-only room</b>This list is only visible to technicians and admins.</div></div>';
     const cats = Array.from(new Set(items.map(i => i.Category))).sort((a, b) => catRank(a) - catRank(b) || cmp(a, b));
     if (!items.length) html += '<div class="note">No equipment on file for this room.</div>';
@@ -428,7 +473,7 @@
             <button class="btn danger small" id="ee-del">Remove</button></div>`;
         } else {
           html += `<div class="eq-row"><span class="model">${esc(it.Model)}</span><span class="qty" ${it.Qty === '' || it.Qty == null ? 'title="Quantity not recorded"' : ''}>×${it.Qty === '' || it.Qty == null ? '?' : esc(it.Qty)}</span>
-            <button class="edit-btn" data-eedit="${i}" aria-label="Edit ${esc(it.Model)}">Edit</button></div>`;
+            ${canEdit() ? `<button class="edit-btn" data-eedit="${i}" aria-label="Edit ${esc(it.Model)}">Edit</button>` : ''}</div>`;
         }
       });
       html += '</div>';
@@ -439,8 +484,8 @@
         <label>Model (pick or type a new one)<input id="add-model" list="dl-add" required><datalist id="dl-add"></datalist></label>
         <label>Qty<input id="add-qty" type="number" min="0" value="1" style="min-width:0;width:70px"></label>
         <button class="btn primary small" type="submit">Add</button><button class="btn small" type="button" id="add-x">Cancel</button></form>`
-      : '<button class="btn small" id="add-open" style="margin-top:10px">+ Add equipment</button>';
-    $('#pbody').innerHTML = html;
+      : canEdit() ? '<button class="btn small" id="add-open" style="margin-top:10px">+ Add equipment</button>' : '';
+    $('#pbody').innerHTML = html; wireProjectLinks($('#pbody'));
     $('#pfoot').innerHTML = '';
     $$('#pbody [data-eedit]').forEach(b => b.onclick = () => { S.eqEdit = +b.dataset.eedit; S.eqAdding = false; renderPanel(); $('#ee-model').focus(); });
     if ($('#ee-save')) {
@@ -463,9 +508,10 @@
     try {
       const d = await api('history', { roomId: r.RoomID });
       if (S.open !== r.RoomID || S.tab !== 'history') return;
-      $('#pbody').innerHTML = d.history.length ? d.history.map(h => `<div class="history-item"><span class="who">${esc(h.User)}</span><span class="when">${esc(h.Timestamp)}</span>
+      $('#pbody').innerHTML = (canEdit() ? roomProjectHistoryHtml(r) : '') + (d.history.length ? d.history.map(h => `<div class="history-item"><span class="who">${esc(h.User)}</span><span class="when">${esc(h.Timestamp)}</span>
         <div class="what">${esc(h.Action)}${has(h.Field) ? ' · ' + esc(h.Field) : ''}${has(h['Old Value']) || has(h['New Value']) ? `: ${esc(h['Old Value'] || '—')} → ${esc(h['New Value'] || '—')}` : ''}</div></div>`).join('')
-        : '<div class="note">No changes recorded for this room yet. Edits made on this site show up here with who made them and when.</div>';
+        : '<div class="note">No changes recorded for this room yet. Edits made on this site show up here with who made them and when.</div>');
+      wireProjectLinks($('#pbody'));
     } catch (e) { $('#pbody').innerHTML = `<div class="note">${esc(e.message)}</div>`; }
   }
 
@@ -480,33 +526,52 @@
     S.catalog.forEach(c => { (cats[c.Category] = cats[c.Category] || []).push(c); });
     (S.extraCats || []).forEach(c => { cats[c] = cats[c] || []; });
     const names = Object.keys(cats).sort((a, b) => catRank(a) - catRank(b) || cmp(a, b));
-    let html = `<div class="page-head"><div><h2>Equipment Catalog</h2><p>Click a model to see which rooms have it. Edit renames a model everywhere it's used.</p></div>
-      <button class="btn small" id="add-cat">+ Add category</button></div><div id="new-cat"></div>`;
+    let html = `<div class="page-head"><div><h2>Equipment Catalog</h2><p>Click a category to open it, then a model to see which rooms have it.${canEdit() ? ' Edit renames a model everywhere it\'s used.' : ''}</p></div>
+      <span style="display:flex;gap:8px;flex-wrap:wrap"><label class="switch"><input type="checkbox" id="show-unused" ${S.showUnused ? 'checked' : ''}><span class="track" aria-hidden="true"></span>Show unused models</label><button class="btn small" id="cat-all">Open all</button><button class="btn small" id="cat-none">Close all</button>${canEdit() ? '<button class="btn small" id="add-cat">+ Add category</button>' : ''}</span></div>
+      <p class="cat-note">Room counts leave out archived rooms. A model is <b>unused</b> when no active room has it${S.role === 'Admin' ? '; only unused models can be deleted' : ''}.</p><div id="new-cat"></div>`;
     names.forEach(cat => {
-      const items = cats[cat].slice().sort((a, b) => cmp(a.Model, b.Model));
-      html += `<section class="cat-section"><h3>${esc(cat)} <small>${items.length} model${items.length === 1 ? '' : 's'}</small></h3><div class="scroll"><table class="t">
+      const all = cats[cat].slice().sort((a, b) => cmp(a.Model, b.Model)).map(it => { const u = roomsUsing(cat, it.Model); return Object.assign({}, it, { _act: u.filter(x => !isArchived(x.room)), _arch: u.filter(x => isArchived(x.room)) }); });
+      const unusedN = all.filter(it => !it._act.length).length;
+      const items = all.filter(it => S.showUnused || it._act.length || S.catEditing === cat + '||' + it.Model);
+      const catOpen = S.catCatOpen.has(cat) || S.catAdding === cat || (S.catEditing || '').startsWith(cat + '||');
+      html += `<details class="cat-section" data-cat="${esc(cat)}" ${catOpen ? 'open' : ''}><summary><h3>${esc(cat)} <small>${all.length - unusedN} in use${unusedN ? ` · ${unusedN} unused${S.showUnused ? '' : ' (hidden)'}` : ''}</small></h3></summary><div class="scroll"><table class="t">
         <thead><tr><th>Model</th><th style="width:70px">Rooms</th><th style="width:130px">Last price paid</th><th></th></tr></thead><tbody>`;
       items.forEach(it => {
-        const k = cat + '||' + it.Model, using = roomsUsing(cat, it.Model), open = S.catOpen.has(k);
+        const k = cat + '||' + it.Model, using = it._act, archUsing = it._arch, open = S.catOpen.has(k);
         const price = has(it['Last Price Paid']) ? '$' + Number(it['Last Price Paid']).toLocaleString() : '—';
         if (S.catEditing === k) {
           html += `<tr><td><input id="ce-model" value="${esc(it.Model)}" aria-label="Model name"></td><td class="num">${using.length}</td>
             <td><input id="ce-price" inputmode="decimal" value="${esc(it['Last Price Paid'])}" aria-label="Last price paid"></td>
             <td class="act"><button class="btn primary small" data-save="${esc(k)}">Save</button> <button class="btn small" data-cancel>Cancel</button></td></tr>`;
         } else {
-          html += `<tr><td><button class="model-link" data-toggle="${esc(k)}" aria-expanded="${open}"><span class="caret">▶</span>${esc(it.Model)}</button></td>
-            <td class="num">${using.length}</td><td class="num">${price}</td><td class="act"><button class="btn small" data-edit="${esc(k)}">Edit</button></td></tr>`;
+          const canDel = S.role === 'Admin' && !using.length;
+          html += `<tr class="${using.length ? '' : 'unused'}"><td><button class="model-link" data-toggle="${esc(k)}" aria-expanded="${open}"><span class="caret">▶</span>${esc(it.Model)}</button>${using.length ? '' : '<span class="tag unused-tag">Unused</span>'}</td>
+            <td class="num">${using.length}</td><td class="num">${price}</td><td class="act">${canEdit() ? `<button class="btn small" data-edit="${esc(k)}">Edit</button>` : ''}${canDel ? ` <button class="btn danger small" data-del="${esc(k)}">Delete</button>` : ''}</td></tr>`;
+          if (S.catDeleting === k) html += `<tr class="where"><td colspan="4"><div class="warn-box"><b>Delete ${esc(it.Model)} from the catalog?</b> It will no longer be offered when adding equipment.${archUsing.length ? (archUsing.length === 1 ? ' The 1 archived room that lists it keeps its equipment record.' : ` The ${archUsing.length} archived rooms that list it keep their equipment records.`) : ''}
+            <span style="display:flex;gap:8px;margin-top:8px"><button class="btn danger small" data-del-yes="${esc(k)}">Yes, delete model</button><button class="btn small" data-cancel>Cancel</button></span></div></td></tr>`;
         }
-        if (open) html += `<tr class="where"><td colspan="4">${using.length ? `<div class="chips">${using.map(u => `<button class="room-chip" data-room="${esc(u.room.RoomID)}">${esc(roomName(u.room))}<span class="q">×${u.qty == null ? '?' : u.qty}</span></button>`).join('')}</div>` : '<span style="opacity:.6">No rooms have this model.</span>'}</td></tr>`;
+        const chip = u => `<button class="room-chip ${isArchived(u.room) ? 'arch' : ''}" data-room="${esc(u.room.RoomID)}">${esc(roomName(u.room))}${isArchived(u.room) ? ' (archived)' : ''}<span class="q">×${u.qty == null ? '?' : u.qty}</span></button>`;
+        if (open) html += `<tr class="where"><td colspan="4">${using.length ? `<div class="chips">${using.map(chip).join('')}</div>` : '<span style="opacity:.6">No active rooms have this model.</span>'}${archUsing.length ? `<div class="chips" style="margin-top:6px">${archUsing.map(chip).join('')}</div>` : ''}</td></tr>`;
       });
       if (S.catAdding === cat) html += `<tr><td><input id="cn-model" placeholder="Model name" aria-label="New model name"></td><td class="num">0</td><td><input id="cn-price" inputmode="decimal" placeholder="0" aria-label="Last price paid"></td>
         <td class="act"><button class="btn primary small" data-create="${esc(cat)}">Add</button> <button class="btn small" data-cancel>Cancel</button></td></tr>`;
-      html += `</tbody></table></div>${S.catAdding === cat ? '' : `<button class="btn small" style="margin-top:8px" data-add="${esc(cat)}">+ Add model</button>`}</section>`;
+      if (!items.length && S.catAdding !== cat) html += `<tr><td colspan="4" style="opacity:.6">All ${all.length} model${all.length === 1 ? '' : 's'} here are unused. Turn on Show unused models to see ${all.length === 1 ? 'it' : 'them'}.</td></tr>`;
+      html += `</tbody></table></div>${S.catAdding === cat || !canEdit() ? '' : `<button class="btn small" style="margin-top:8px" data-add="${esc(cat)}">+ Add model</button>`}</details>`;
     });
-    const main = $('#main'); main.innerHTML = html;
+    const main = subHost(); main.innerHTML = html;
+    $$('details.cat-section', main).forEach(d => d.addEventListener('toggle', () => { d.open ? S.catCatOpen.add(d.dataset.cat) : S.catCatOpen.delete(d.dataset.cat); }));
+    $('#cat-all').onclick = () => { names.forEach(n => S.catCatOpen.add(n)); renderCatalog(); };
+    $('#cat-none').onclick = () => { S.catCatOpen.clear(); renderCatalog(); };
+    $('#show-unused').onchange = e => { S.showUnused = e.target.checked; renderCatalog(); };
+    $$('[data-del]', main).forEach(b => b.onclick = () => { S.catDeleting = b.dataset.del; S.catEditing = null; S.catAdding = null; renderCatalog(); });
+    $$('[data-del-yes]', main).forEach(b => b.onclick = async () => {
+      const i = b.dataset.delYes.indexOf('||'), cat = b.dataset.delYes.slice(0, i), model = b.dataset.delYes.slice(i + 2);
+      try { const d = await api('deleteCatalogItem', { category: cat, model }); S.catalog = d.catalog; S.catDeleting = null; S.catOpen.delete(b.dataset.delYes); toast('Model deleted'); renderCatalog(); }
+      catch (e) { toast(e.message, true); }
+    });
     $$('[data-toggle]', main).forEach(b => b.onclick = () => { const k = b.dataset.toggle; S.catOpen.has(k) ? S.catOpen.delete(k) : S.catOpen.add(k); renderCatalog(); });
     $$('[data-edit]', main).forEach(b => b.onclick = () => { S.catEditing = b.dataset.edit; S.catAdding = null; renderCatalog(); $('#ce-model').focus(); });
-    $$('[data-cancel]', main).forEach(b => b.onclick = () => { S.catEditing = null; S.catAdding = null; renderCatalog(); });
+    $$('[data-cancel]', main).forEach(b => b.onclick = () => { S.catEditing = null; S.catAdding = null; S.catDeleting = null; renderCatalog(); });
     $$('[data-add]', main).forEach(b => b.onclick = () => { S.catAdding = b.dataset.add; S.catEditing = null; renderCatalog(); $('#cn-model').focus(); });
     $$('[data-room]', main).forEach(b => b.onclick = () => { const r = S.rooms.find(x => x.RoomID === b.dataset.room); openRoom(r); S.tab = 'equipment'; renderPanel(); });
     $$('[data-save]', main).forEach(b => b.onclick = async () => {
@@ -517,11 +582,11 @@
       const m = $('#cn-model').value.trim(); if (!m) { toast('Enter a model name', true); return; }
       await saveCatalog({ category: b.dataset.create, oldModel: null, model: m, price: $('#cn-price').value.replace(/[$,]/g, '').trim() });
     });
-    $('#add-cat').onclick = () => {
+    if ($('#add-cat')) $('#add-cat').onclick = () => {
       $('#new-cat').innerHTML = `<form class="inline-form" id="nc"><label>New category name<input id="nc-name" placeholder="e.g. Wireless Presentation Hub" required></label>
         <button class="btn primary small" type="submit">Create category</button><button class="btn small" type="button" id="nc-x">Cancel</button></form>`;
       $('#nc-x').onclick = () => { $('#new-cat').innerHTML = ''; };
-      $('#nc').onsubmit = e => { e.preventDefault(); const n = $('#nc-name').value.trim(); if (!n) return; S.extraCats = (S.extraCats || []).concat(n); S.catAdding = n; renderCatalog(); $('#cn-model').focus(); };
+      $('#nc').onsubmit = e => { e.preventDefault(); const n = $('#nc-name').value.trim(); if (!n) return; S.extraCats = (S.extraCats || []).concat(n); S.catAdding = n; S.catCatOpen.add(n); renderCatalog(); $('#cn-model').focus(); };
     };
   }
   async function saveCatalog(p) {
@@ -576,17 +641,18 @@
     const sec = (key, title, body, exp) => `<details class="report rp-sec" data-sec="${key}" ${S.rpOpen[key] ? 'open' : ''}>
         <summary><span class="rp-title">${title}</span><span class="rp-count" id="cnt-${key}"></span></summary>
         <div class="rp-body"><div style="display:flex;justify-content:flex-end;margin-bottom:10px">${exportButtons(exp)}</div>${body}</div></details>`;
-    $('#main').innerHTML = `<div class="page-head"><div><h2>Reports</h2><p>Click a report to open or close it.</p></div></div>` +
+    subHost().innerHTML = `<div class="page-head"><div><h2>Reports</h2><p>Click a report to open or close it.</p></div></div>` +
       sec('eq', 'Which rooms have this equipment?', `<div class="controls">
           <select class="dd" id="rp-cat" aria-label="Category">${cats.map(c => `<option ${c === S.rp.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
           <select class="dd" id="rp-model" aria-label="Model"></select>
           <select class="dd" id="rp-ctl" aria-label="Room type"><option value="all">All rooms</option><option value="ctl">CTL-supported rooms</option><option value="non">Non-CTL rooms</option></select>
         </div><div id="rp-out"></div>`, 'eq') +
       sec('pl', 'Planned upgrades', '<div id="rp-plan"></div>', 'pl') +
-      sec('lc', 'Lifecycle refresh candidates', `<p style="font-size:12.5px;opacity:.75;margin:0 0 10px">Rooms with a planned update year are left off this list and shown under Planned upgrades.</p>
+      sec('lc', 'Lifecycle refresh candidates', `<p style="font-size:12.5px;opacity:.75;margin:0 0 10px">Left off this list: rooms with an open project past consultation or a planned update year (see Planned upgrades), and rooms marked Won't be updated (see the next report).</p>
         <div class="controls"><label style="font-size:12.5px;display:flex;gap:8px;align-items:center">Equipment info older than
           <input id="rp-year" type="number" value="${new Date().getFullYear() - STALE}" style="width:84px;padding:6px 8px;border:1px solid var(--line-strong);border-radius:3px;background:var(--card)"></label></div>
-        <div id="rp-life"></div>`, 'lc');
+        <div id="rp-life"></div>`, 'lc') +
+      sec('nu', "Won't be updated", `<p style="font-size:12.5px;opacity:.75;margin:0 0 10px">Rooms whose Refresh Plan is set to Won't be updated. To put one back on the refresh list, open it and clear Refresh Plan.</p><div id="rp-nu"></div>`, 'nu');
     $$('.rp-sec').forEach(d => d.addEventListener('toggle', () => { S.rpOpen[d.dataset.sec] = d.open; }));
     $('#rp-ctl').value = S.rp.ctl;
     const eqRows = () => {
@@ -594,7 +660,7 @@
       const rows = [];
       S.equipment.forEach(e => {
         if (e.Category !== S.rp.cat || (S.rp.model && e.Model !== S.rp.model)) return;
-        const r = byId[e.RoomID]; if (!r) return;
+        const r = byId[e.RoomID]; if (!r || isArchived(r)) return;
         if (S.rp.ctl === 'ctl' && !isCTL(r)) return; if (S.rp.ctl === 'non' && isCTL(r)) return;
         const row = [r.Building, r.Room, r.Zone || '', isCTL(r) ? 'CTL' : 'Non-CTL', r['Record Type'] || '', e.Model, e.Qty === '' || e.Qty == null ? '' : +e.Qty];
         row._id = r.RoomID; rows.push(row);
@@ -613,7 +679,7 @@
       let a = 0, b = 0, unk = 0;
       rows.forEach(r => { if (r[6] === '') unk++; else if (r[3] === 'CTL') a += r[6]; else b += r[6]; });
       const rooms = new Set(rows.map(r => r._id)).size;
-      $('#cnt-eq').textContent = `${S.rp.cat}${S.rp.model ? ' · ' + S.rp.model : ''} · ${rooms} rooms`;
+      $('#cnt-eq').textContent = `${S.rp.cat}${S.rp.model ? ' · ' + S.rp.model : ''} · ${rooms} room${rooms === 1 ? '' : 's'}`;
       $('#rp-out').innerHTML = `<div class="tiles" style="margin-bottom:14px"><div><div class="num">${rooms}</div><div class="lbl">rooms</div></div>
         <div><div class="num">${a}</div><div class="lbl">units in CTL rooms</div></div><div><div class="num">${b}</div><div class="lbl">units in non-CTL rooms</div></div>
         ${unk ? `<div><div class="num">${unk}</div><div class="lbl">entries with no count</div></div>` : ''}</div>` +
@@ -626,27 +692,41 @@
     const LCH = ['Building', 'Room', 'Zone', 'CTL', 'Equipment Info As Of', 'Latest Update'];
     const lcRows = () => {
       const y = +$('#rp-year').value || 0;
-      return S.rooms.filter(r => r['Record Type'] !== 'Contact Info Only' && !plannedYear(r) && asOfYear(r['Equipment Info As Of']) && asOfYear(r['Equipment Info As Of']) < y)
+      return S.rooms.filter(r => !isArchived(r) && !wontUpdate(r) && r['Record Type'] !== 'Contact Info Only' && !plannedYear(r) && !committedProject(r) && asOfYear(r['Equipment Info As Of']) && asOfYear(r['Equipment Info As Of']) < y)
         .sort((a, b) => String(a['Equipment Info As Of']).localeCompare(String(b['Equipment Info As Of'])))
         .map(r => { const row = [r.Building, r.Room, r.Zone || '', isCTL(r) ? 'CTL' : 'Non-CTL', r['Equipment Info As Of'], r['Latest Update'] || '']; row._id = r.RoomID; return row; });
     };
     const life = () => {
       const rows = lcRows();
-      $('#cnt-lc').textContent = rows.length + ' rooms';
-      $('#rp-life').innerHTML = `<p style="font-size:12.5px;margin:0 0 10px">${rows.length} rooms, oldest first.</p>` + (rows.length ? tableHtml(LCH, rows) : '');
+      $('#cnt-lc').textContent = rows.length + (rows.length === 1 ? ' room' : ' rooms');
+      $('#rp-life').innerHTML = `<p style="font-size:12.5px;margin:0 0 10px">${rows.length} rooms, oldest first. Archived rooms are left out.</p>` + (rows.length ? tableHtml(LCH, rows) : '');
       $$('#rp-life [data-room]').forEach(x => x.onclick = () => openRoom(S.rooms.find(r => r.RoomID === x.dataset.room)));
     };
     $('#lc-csv').onclick = () => exportCSV('Lifecycle refresh candidates', LCH, lcRows());
     $('#lc-xlsx').onclick = () => exportXLSX('Lifecycle refresh candidates', [{ name: 'Lifecycle', headers: LCH, rows: lcRows() }]);
-    const PLH = ['Building', 'Room', 'Zone', 'CTL', 'Planned Update Year', 'Funding Source', 'Funding Status', 'Equipment Info As Of'];
-    const plRows = () => S.rooms.filter(r => plannedYear(r)).sort((a, b) => plannedYear(a) - plannedYear(b) || cmp(a.Building, b.Building) || cmp(a.Room, b.Room))
-      .map(r => { const row = [r.Building, r.Room, r.Zone || '', isCTL(r) ? 'CTL' : 'Non-CTL', plannedYear(r), r['Funding Source'] || '', r['Funding Status'] || '', r['Equipment Info As Of'] || '']; row._id = r.RoomID; return row; });
+    const PLH = ['Building', 'Room', 'Zone', 'CTL', 'Planned', 'Status', 'Funding Source', 'Ticket', 'Equipment Info As Of'];
+    // A room is planned if it has an open project past consultation, or a hand-typed Planned Update Year.
+    const plYear = r => { const p = committedProject(r); if (p) { const m = /(\d{2})\s*$/.exec(p['STF Year'] || ''); return m ? 2000 + +m[1] : 9999; } return plannedYear(r); };
+    const plRows = () => S.rooms.filter(r => !isArchived(r) && (committedProject(r) || plannedYear(r))).sort((a, b) => plYear(a) - plYear(b) || cmp(a.Building, b.Building) || cmp(a.Room, b.Room))
+      .map(r => { const p = committedProject(r);
+        const row = p ? [r.Building, r.Room, r.Zone || '', isCTL(r) ? 'CTL' : 'Non-CTL', p['STF Year'] || '', 'Project: ' + p.Phase, p['Funding Source'] || '', p['Ticket ID'] || '', r['Equipment Info As Of'] || '']
+          : [r.Building, r.Room, r.Zone || '', isCTL(r) ? 'CTL' : 'Non-CTL', plannedYear(r), r['Funding Status'] || '', r['Funding Source'] || '', '', r['Equipment Info As Of'] || ''];
+        row._id = r.RoomID; return row; });
     const pr = plRows();
-    $('#cnt-pl').textContent = pr.length + ' rooms';
-    $('#rp-plan').innerHTML = pr.length ? tableHtml(PLH, pr) : '<div class="note">No planned upgrades. Set a Planned Update Year and Funding Status on a room to add it here.</div>';
+    $('#cnt-pl').textContent = pr.length + (pr.length === 1 ? ' room' : ' rooms');
+    $('#rp-plan').innerHTML = pr.length ? tableHtml(PLH, pr) : '<div class="note">No planned upgrades. Rooms show up here when they have a project in Funding Requested or later, or a Planned Update Year.</div>';
     $$('#rp-plan [data-room]').forEach(x => x.onclick = () => openRoom(S.rooms.find(r => r.RoomID === x.dataset.room)));
     $('#pl-csv').onclick = () => exportCSV('Planned upgrades', PLH, plRows());
     $('#pl-xlsx').onclick = () => exportXLSX('Planned upgrades', [{ name: 'Planned upgrades', headers: PLH, rows: plRows() }]);
+    const NUH = ['Building', 'Room', 'Zone', 'CTL', 'Equipment Info As Of', 'Notes'];
+    const nuRows = () => S.rooms.filter(r => !isArchived(r) && wontUpdate(r)).sort((a, b) => cmp(a.Building, b.Building) || cmp(a.Room, b.Room))
+      .map(r => { const row = [r.Building, r.Room, r.Zone || '', isCTL(r) ? 'CTL' : 'Non-CTL', r['Equipment Info As Of'] || '', r.Notes || '']; row._id = r.RoomID; return row; });
+    const nr = nuRows();
+    $('#cnt-nu').textContent = nr.length + (nr.length === 1 ? ' room' : ' rooms');
+    $('#rp-nu').innerHTML = nr.length ? tableHtml(NUH, nr) : '<div class="note">No rooms are marked Won\'t be updated.</div>';
+    $$('#rp-nu [data-room]').forEach(x => x.onclick = () => openRoom(S.rooms.find(r => r.RoomID === x.dataset.room)));
+    $('#nu-csv').onclick = () => exportCSV("Rooms that won't be updated", NUH, nuRows());
+    $('#nu-xlsx').onclick = () => exportXLSX("Rooms that won't be updated", [{ name: "Won't be updated", headers: NUH, rows: nuRows() }]);
     $('#rp-cat').onchange = e => { S.rp.cat = e.target.value; S.rp.model = ''; fillModels(); };
     $('#rp-model').onchange = e => { S.rp.model = e.target.value; out(); };
     $('#rp-ctl').onchange = e => { S.rp.ctl = e.target.value; out(); };
@@ -658,11 +738,11 @@
   function renderZones() {
     const zones = S.zones.slice().sort((a, b) => cmp(a.Zone, b.Zone));
     const names = zones.map(z => z.Zone);
-    const ctlIn = z => S.rooms.filter(r => isCTL(r) && String(r.Zone || '').trim().toLowerCase() === String(z).trim().toLowerCase()).sort((a, b) => cmp(a.Building, b.Building) || cmp(a.Room, b.Room));
+    const ctlIn = z => S.rooms.filter(r => isCTL(r) && !isArchived(r) && String(r.Zone || '').trim().toLowerCase() === String(z).trim().toLowerCase()).sort((a, b) => cmp(a.Building, b.Building) || cmp(a.Room, b.Room));
     const noZone = S.rooms.filter(r => !has(r.Zone)).length;
     const totalRooms = zones.reduce((n, z) => n + ctlIn(z.Zone).length, 0), totalSeats = zones.reduce((n, z) => n + ctlIn(z.Zone).reduce((s, r) => s + seats(r), 0), 0);
     let html = `<div class="page-head"><div><h2>Zones</h2><p>Each room's CTL contact comes from its zone. Change a technician here and every room in that zone, CTL or non-CTL, shows the new person. The backup zone's technician is listed as who to call if the first person is unavailable.</p></div>
-      <span style="display:flex;gap:8px;flex-wrap:wrap">${exportButtons('zn')}<button class="btn primary small" id="zn-add">+ Add zone</button></span></div>
+      <span style="display:flex;gap:8px;flex-wrap:wrap">${exportButtons('zn')}${canEdit() ? '<button class="btn primary small" id="zn-add">+ Add zone</button>' : ''}</span></div>
       <div class="tiles" style="margin-bottom:18px"><div><div class="num">${totalRooms}</div><div class="lbl">CTL-supported rooms</div></div><div><div class="num">${totalSeats.toLocaleString()}</div><div class="lbl">seats in CTL rooms</div></div>
       ${noZone ? `<div><div class="num">${noZone}</div><div class="lbl">rooms with no zone set</div></div>` : ''}</div>`;
     const list = zones.slice(); if (S.zoneEditing === '__new') list.push({ Zone: '', 'CTL Technician': '', Email: '', Phone: '', 'Backup Zone': '', _new: true });
@@ -685,16 +765,16 @@
         html += `<div class="page-head" style="margin-bottom:8px"><div><h3 style="margin:0">${esc(z.Zone)} <span style="font-family:var(--font-body);font-size:12px;font-weight:400;opacity:.7">${rooms.length} CTL rooms · ${seatSum.toLocaleString()} seats · ${all} rooms in zone</span></h3>
           <p style="opacity:.9">${has(z['CTL Technician']) ? `<b>${esc(z['CTL Technician'])}</b> · ${esc(z.Email || '')} · ${esc(z.Phone || '')}` : '<i>No technician set</i>'}<br>
           Backup: ${b ? `${esc(b.Zone)} zone, ${esc(b['CTL Technician'] || 'no technician')}${has(b.Phone) ? ' · ' + esc(b.Phone) : ''}` : '<i>not set</i>'}</p></div>
-          <button class="btn small" data-zedit="${esc(z.Zone)}">Edit</button></div>
+          ${canEdit() ? `<button class="btn small" data-zedit="${esc(z.Zone)}">Edit</button>` : ''}</div>
           <details><summary style="cursor:pointer;font-size:12.5px">Show ${rooms.length} CTL rooms</summary><div style="margin-top:10px">${
             rooms.length ? tableHtml(['Building', 'Room', 'Room Type', 'Seats'], rooms.map(r => { const row = [r.Building, r.Room, r['Room Type'] || '', seats(r) || '']; row._id = r.RoomID; return row; }), [3]) : '<div class="note">No CTL-supported rooms in this zone.</div>'}</div></details>`;
       }
       html += `</section>`;
     });
-    $('#main').innerHTML = html;
+    subHost().innerHTML = html;
     $$('[data-zedit]').forEach(x => x.onclick = () => { S.zoneEditing = x.dataset.zedit; renderZones(); });
     $$('#main [data-room]').forEach(x => x.onclick = () => openRoom(S.rooms.find(r => r.RoomID === x.dataset.room)));
-    $('#zn-add').onclick = () => { S.zoneEditing = '__new'; renderZones(); };
+    if ($('#zn-add')) $('#zn-add').onclick = () => { S.zoneEditing = '__new'; renderZones(); };
     if ($('#zf')) {
       $('#zf-x').onclick = () => { S.zoneEditing = null; renderZones(); };
       $('#zf').onsubmit = async e => {
@@ -714,20 +794,339 @@
     $('#zn-xlsx').onclick = () => exportXLSX('CTL rooms by zone', [{ name: 'Summary', headers: SH, rows: sumRows() }, { name: 'CTL rooms', headers: ZH, rows: zRows() }]);
   }
 
+  // ------------------------------------------------------------------ projects
+  // A project moves through PHASES; Cancelled sits off the board. Projects link to rooms by RoomID.
+  const PHASES = ['Consultation', 'Funding Requested', 'Funded', 'Equipment Ordered', 'Equipment Received', 'Active', 'Completed'];
+  const OPEN_PHASES = PHASES.slice(0, 6);
+  const COMMITTED = ['Funding Requested', 'Funded', 'Equipment Ordered', 'Equipment Received', 'Active']; // counts as a planned upgrade
+  const PROJECT_TYPES = ['Complete Upgrade', 'Partial Upgrade', 'New Install', 'Uninstall & Reinstall', 'Repair / Replacement', 'Consultation', 'Decommission', 'Other'];
+  const FUNDING = ['STF', 'Client Funded', 'Other'];
+  const TDX = CFG.TDX_TICKET_URL || 'https://uga.teamdynamix.com/TDNext/Apps/499/Tickets/TicketDet.aspx?TicketID=';
+  const PJ_FIELDS = ['Title', 'Ticket ID', 'Project Type', 'Funding Source', 'STF Year', 'Amount', 'Proposed Install', 'Department', 'Notes'];
+
+  const projRooms = p => String(p.Rooms || '').split(/[,;\s]+/).filter(Boolean);
+  const projectsFor = id => S.projects.filter(p => projRooms(p).includes(id));
+  const isOpenProject = p => OPEN_PHASES.includes(p.Phase);
+  function committedProject(r) {
+    const list = projectsFor(r.RoomID).filter(p => COMMITTED.includes(p.Phase));
+    return list.sort((a, b) => PHASES.indexOf(b.Phase) - PHASES.indexOf(a.Phase))[0] || null;
+  }
+  const ticketLink = p => has(p['Ticket ID']) ? `<a class="tdx" href="${esc(TDX + encodeURIComponent(p['Ticket ID']))}" target="_blank" rel="noopener">#${esc(p['Ticket ID'])} ↗</a>` : '';
+  const money = v => has(v) && !isNaN(+v) ? '$' + Number(v).toLocaleString() : '';
+  const roomLabelById = id => { const r = S.rooms.find(x => x.RoomID === id); return r ? roomName(r) : id; };
+  // STF / fiscal year runs July 1 – June 30 and is named for the year it ends in: 2026-07-01 → FY27.
+  function fyOf(date) { const m = /^(\d{4})-(\d{2})/.exec(String(date || '')); if (!m) return null; return (+m[2] >= 7 ? +m[1] + 1 : +m[1]); }
+  const fyLabel = y => `STF${String(y).slice(-2)} (Jul 1, ${y - 1} – Jun 30, ${y})`;
+  const phaseDate = (p, ph) => String(p[ph + ' On'] || '').slice(0, 10);
+  const lastPhaseDate = p => phaseDate(p, p.Phase);
+
+  function stepper(p, clickable) {
+    const cur = PHASES.indexOf(p.Phase);
+    return `<div class="stepper ${p.Phase === 'Cancelled' ? 'cancelled' : ''}">${PHASES.map((ph, i) => {
+      const st = p.Phase === 'Cancelled' ? '' : i < cur ? 'done' : i === cur ? 'current' : '';
+      const d = phaseDate(p, ph);
+      return `<button class="step ${st}" ${clickable ? `data-phase="${esc(ph)}"` : 'disabled'} title="${esc(ph)}${d ? ' · ' + d : ''}"><span>${esc(ph)}</span>${d ? `<small>${esc(d)}</small>` : ''}</button>`;
+    }).join('')}</div>`;
+  }
+
+  // Room panel: projects linked to this room
+  function roomProjectsHtml(r) {
+    if (!canEdit()) return '';
+    const list = projectsFor(r.RoomID);
+    const open = list.filter(isOpenProject);
+    let html = `<div class="section-title">Projects</div>`;
+    html += open.length ? open.map(p => `<div class="contact pj-mini"><div class="role">${esc(p.Phase)}${lastPhaseDate(p) ? ' since ' + esc(lastPhaseDate(p)) : ''}</div>
+        <button class="model-link" data-project="${esc(p.ProjectID)}">${esc(p.Title)}</button>
+        <div class="line">${[p['Funding Source'], p['STF Year'], money(p.Amount)].filter(has).map(esc).join(' · ')} ${ticketLink(p)}</div></div>`).join('')
+      : '<div class="note">No open project for this room.</div>';
+    const done = list.filter(p => p.Phase === 'Completed').length;
+    html += `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 4px"><button class="btn small" data-newproject="${esc(r.RoomID)}">+ New project for this room</button>
+      ${done ? `<button class="btn small" data-tabjump="history">${done} completed project${done === 1 ? '' : 's'} in History</button>` : ''}</div>`;
+    return html;
+  }
+  function roomProjectHistoryHtml(r) {
+    const list = projectsFor(r.RoomID).sort((a, b) => cmp(lastPhaseDate(b) || b.Created, lastPhaseDate(a) || a.Created));
+    if (!list.length) return '';
+    return `<div class="section-title">Projects</div><div class="scroll" style="margin-bottom:16px"><table class="t"><thead><tr><th>Project</th><th>Phase</th><th>Date</th><th>Ticket</th></tr></thead><tbody>${list.map(p =>
+      `<tr><td><button class="model-link" data-project="${esc(p.ProjectID)}">${esc(p.Title)}</button></td><td>${esc(p.Phase)}</td><td>${esc(lastPhaseDate(p))}</td><td>${ticketLink(p)}</td></tr>`).join('')}</tbody></table></div>
+      <div class="section-title">Changes</div>`;
+  }
+  function wireProjectLinks(root) {
+    $$('[data-project]', root).forEach(b => b.onclick = () => openProject(b.dataset.project));
+    $$('[data-newproject]', root).forEach(b => b.onclick = () => newProject([b.dataset.newproject]));
+    $$('[data-tabjump]', root).forEach(b => b.onclick = () => { S.tab = b.dataset.tabjump; renderPanel(); });
+  }
+
+  // ---- Projects page
+  function renderProjects() {
+    const v = S.pj.view;
+    const head = `<div class="page-head"><div><h2>Projects</h2><p>Room upgrade projects from first consultation to completion. Click a project to see or change it.</p></div>
+      <span style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary small" id="pj-new">+ New project</button></span></div>
+      <div class="seg" role="tablist">${[['board', 'Board'], ['completed', 'Completed']].map(([k, l]) =>
+        `<button class="seg-btn ${v === k ? 'active' : ''}" data-pjview="${k}">${l}</button>`).join('')}</div>`;
+    $('#main').innerHTML = head + '<div id="pj-body"></div>';
+    $$('[data-pjview]').forEach(b => b.onclick = () => { S.pj.view = b.dataset.pjview; S.pj.q = ''; renderProjects(); });
+    $('#pj-new').onclick = () => newProject([]);
+    if (v === 'completed') renderCompleted(); else renderBoard();
+  }
+  function pjMatches(p, q) {
+    if (!q) return true;
+    const hay = [p.Title, p['Ticket ID'], p['STF Year'], p['Funding Source'], p.Notes, p.Department].concat(projRooms(p).map(roomLabelById)).join(' ').toLowerCase();
+    return q.toLowerCase().split(/\s+/).every(w => hay.includes(w));
+  }
+  function renderBoard() {
+    const years = Array.from(new Set(S.projects.filter(isOpenProject).map(p => p['STF Year']).filter(has))).sort(cmp);
+    const list = S.projects.filter(p => isOpenProject(p) && pjMatches(p, S.pj.q) && (!S.pj.fy || p['STF Year'] === S.pj.fy) && (!S.pj.fund || p['Funding Source'] === S.pj.fund));
+    const card = p => `<button class="pj-card" draggable="true" data-project="${esc(p.ProjectID)}">
+        <span class="pj-title">${esc(p.Title)}</span>
+        <span class="pj-meta">${projRooms(p).length ? esc(projRooms(p).slice(0, 2).map(roomLabelById).join(', ')) + (projRooms(p).length > 2 ? ` +${projRooms(p).length - 2}` : '') : '<i>No room linked</i>'}</span>
+        <span class="pj-meta">${[p['Funding Source'], p['STF Year'], money(p.Amount)].filter(has).map(esc).join(' · ')}</span>
+        <span class="pj-foot">${has(p['Ticket ID']) ? '#' + esc(p['Ticket ID']) : 'No ticket'}${lastPhaseDate(p) ? ' · since ' + esc(lastPhaseDate(p)) : ''}</span></button>`;
+    $('#pj-body').innerHTML = `<div class="controls" style="margin-top:12px">
+        <input class="search" id="pj-q" type="search" placeholder="Search title, room, ticket…" value="${esc(S.pj.q)}" style="flex:1 1 260px">
+        <select class="dd" id="pj-fy"><option value="">All STF years</option>${years.map(y => `<option ${y === S.pj.fy ? 'selected' : ''}>${esc(y)}</option>`).join('')}</select>
+        <select class="dd" id="pj-fund"><option value="">All funding</option>${FUNDING.map(f => `<option ${f === S.pj.fund ? 'selected' : ''}>${f}</option>`).join('')}</select></div>
+      <div class="board-scroll"><div class="board">
+        ${OPEN_PHASES.map(ph => { const col = list.filter(p => p.Phase === ph).sort((a, b) => cmp(a.Title, b.Title));
+          return `<section class="col" data-drop="${esc(ph)}"><h3 class="chev" title="${ph === 'Equipment Received' ? 'Equipment is here, waiting to install' : esc(ph)}">${esc(ph)} <small>${col.length}</small></h3><div class="col-body">${col.map(card).join('') || '<div class="col-empty">None</div>'}</div></section>`; }).join('')}
+        <section class="col col-done" data-drop="Completed"><h3 class="chev">Completed <small>${S.projects.filter(p => p.Phase === 'Completed' && fyOf(phaseDate(p, 'Completed')) === fyOf(new Date().toISOString().slice(0, 10))).length} in STF${String(fyOf(new Date().toISOString().slice(0, 10))).slice(-2)}</small></h3>
+          <div class="col-body"><div class="col-empty">Drop a project here to mark it completed.</div><button class="btn small" id="pj-see-done">See completed</button></div></section>
+      </div></div>
+      <p class="cat-note" style="margin-top:10px">Drag a card to another column to change its phase, or click it to open it. Drop on Completed to finish it. Completed and cancelled projects are under Completed.</p>`;
+    const q = $('#pj-q');
+    q.oninput = () => { S.pj.q = q.value; clearTimeout(renderBoard.t); renderBoard.t = setTimeout(() => { renderBoard(); const n = $('#pj-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 200); };
+    $('#pj-fy').onchange = e => { S.pj.fy = e.target.value; renderBoard(); };
+    $('#pj-fund').onchange = e => { S.pj.fund = e.target.value; renderBoard(); };
+    $('#pj-see-done').onclick = () => { S.pj.view = 'completed'; S.pj.q = ''; renderProjects(); };
+    wireProjectLinks($('#pj-body'));
+    // drag and drop between columns (mouse; on touch screens open the card and click a phase instead)
+    let dragId = null;
+    $$('.pj-card[draggable]').forEach(c => {
+      c.addEventListener('dragstart', e => { dragId = c.dataset.project; c.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', dragId); } catch (x) {} });
+      c.addEventListener('dragend', () => { c.classList.remove('dragging'); $$('.col.drop-over').forEach(x => x.classList.remove('drop-over')); });
+    });
+    $$('.col[data-drop]').forEach(col => {
+      col.addEventListener('dragover', e => { if (!dragId) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; col.classList.add('drop-over'); });
+      col.addEventListener('dragleave', e => { if (!col.contains(e.relatedTarget)) col.classList.remove('drop-over'); });
+      col.addEventListener('drop', e => { e.preventDefault(); col.classList.remove('drop-over'); const id = dragId; dragId = null; if (id) moveProject(id, col.dataset.drop); });
+    });
+  }
+  async function moveProject(id, phase) {
+    const p = S.projects.find(x => x.ProjectID === id);
+    if (!p || p.Phase === phase) return;
+    if (phase === 'Completed') { openProject(id); S.pj.confirm = 'Completed'; renderProjectPanel(); return; }   // asks for the completion date
+    const old = p.Phase;
+    p.Phase = phase; renderBoard();                                                   // move it right away, undo if the save fails
+    try { const d = await api('saveProject', { project: Object.assign({}, p, { Phase: phase }) }); S.projects = d.projects; toast(`Moved to ${phase}`); }
+    catch (e) { p.Phase = old; toast(e.message, true); }
+    if (S.page === 'projects' && S.pj.view === 'board') renderBoard();
+  }
+  function pjTable(headers, rows, list) {
+    return `<div class="scroll"><table class="t"><thead><tr>${headers.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map((r, i) => `<tr>${r.map((v, c) =>
+      `<td class="${headers[c] === 'Amount' ? 'num' : ''}">${headers[c] === 'Project' ? `<button class="model-link" data-project="${esc(list[i].ProjectID)}">${esc(v)}</button>`
+        : headers[c] === 'Ticket' ? ticketLink(list[i]) : headers[c] === 'Amount' ? esc(money(v)) : esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  }
+  function renderCompleted() {
+    const curFY = fyOf(new Date().toISOString().slice(0, 10));
+    const done = S.projects.filter(p => p.Phase === 'Completed');
+    const dated = done.filter(p => phaseDate(p, 'Completed'));
+    const undated = done.filter(p => !phaseDate(p, 'Completed'));
+    const cancelled = S.projects.filter(p => p.Phase === 'Cancelled');
+    const oldest = dated.reduce((m, p) => Math.min(m, fyOf(phaseDate(p, 'Completed'))), curFY);
+    const years = []; for (let y = curFY; y >= oldest; y--) years.push(y);
+    const sel = S.pj.year || curFY;
+    const q = (S.pj.q || '').trim();
+    let list, title, dateField = 'Completed';
+    if (q) { list = done.concat(cancelled).filter(p => pjMatches(p, q)); title = `Search results in all years`; }
+    else if (sel === 'undated') { list = undated; title = 'Completed, no completion date'; }
+    else if (sel === 'cancelled') { list = cancelled; title = 'Cancelled projects'; dateField = 'Cancelled'; }
+    else { list = dated.filter(p => fyOf(phaseDate(p, 'Completed')) === +sel); title = fyLabel(+sel); }
+    const dateOf = p => phaseDate(p, p.Phase === 'Cancelled' ? 'Cancelled' : 'Completed');
+    list = list.slice().sort((a, b) => cmp(dateOf(b) || '0', dateOf(a) || '0') || cmp(a.Title, b.Title));   // newest first
+    const H = [q ? 'Date' : dateField + ' On', 'Project', 'Rooms', 'Type', 'Funding', 'STF Year', 'Amount', 'Ticket'].concat(q ? ['Phase'] : []);
+    const rows = list.map(p => [dateOf(p), p.Title, projRooms(p).map(roomLabelById).join('; '), p['Project Type'] || '', p['Funding Source'] || '', p['STF Year'] || '',
+      has(p.Amount) && !isNaN(+p.Amount) ? +p.Amount : '', p['Ticket ID'] || ''].concat(q ? [p.Phase] : []));
+    const nRooms = new Set(list.flatMap(projRooms)).size;
+    const total = list.reduce((t, p) => t + (has(p.Amount) && !isNaN(+p.Amount) ? +p.Amount : 0), 0);
+    const stf = list.filter(p => p['Funding Source'] === 'STF' || /^FY\d{2}$/.test(p['STF Year'] || '')).length;
+    const counts = {}; dated.forEach(p => { const y = fyOf(phaseDate(p, 'Completed')); counts[y] = (counts[y] || 0) + 1; });
+    $('#pj-body').innerHTML = `<div class="controls" style="margin-top:12px">
+        <select class="dd" id="pj-year" aria-label="STF year" ${q ? 'disabled' : ''}>${years.map(y => `<option value="${y}" ${String(y) === String(sel) ? 'selected' : ''}>${esc(fyLabel(y))}${y === curFY ? ' · current' : ''} — ${counts[y] || 0}</option>`).join('')}
+          ${undated.length ? `<option value="undated" ${sel === 'undated' ? 'selected' : ''}>Completed, no date — ${undated.length}</option>` : ''}
+          ${cancelled.length ? `<option value="cancelled" ${sel === 'cancelled' ? 'selected' : ''}>Cancelled — ${cancelled.length}</option>` : ''}</select>
+        <input class="search" id="pj-q" type="search" placeholder="Search all years: title, room, ticket…" value="${esc(S.pj.q)}" style="flex:1 1 240px">
+        ${exportButtons('pjc')}</div>
+      <h3 class="pj-year-title">${esc(title)}</h3>
+      <div class="tiles" style="margin:6px 0 14px"><div><div class="num">${list.length}</div><div class="lbl">project${list.length === 1 ? '' : 's'}</div></div>
+        <div><div class="num">${nRooms}</div><div class="lbl">rooms</div></div><div><div class="num">${stf}</div><div class="lbl">STF funded</div></div>
+        <div><div class="num">${money(total) || '$0'}</div><div class="lbl">recorded amount</div></div></div>
+      ${rows.length ? pjTable(H, rows, list) : `<div class="note">${q ? 'No completed or cancelled projects match.' : 'No projects completed in this STF year yet.'}</div>`}`;
+    $('#pj-year').onchange = e => { S.pj.year = /^\d+$/.test(e.target.value) ? +e.target.value : e.target.value; renderCompleted(); };
+    const qi = $('#pj-q');
+    qi.oninput = () => { S.pj.q = qi.value; clearTimeout(renderCompleted.t); renderCompleted.t = setTimeout(() => { renderCompleted(); const n = $('#pj-q'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250); };
+    const name = () => q ? 'Projects search' : sel === 'cancelled' ? 'Cancelled projects' : sel === 'undated' ? 'Completed projects (no date)' : 'Completed projects STF' + String(sel).slice(-2);
+    $('#pjc-csv').onclick = () => exportCSV(name(), H, rows);
+    $('#pjc-xlsx').onclick = () => exportXLSX(name(), [{ name: 'Projects', headers: H, rows }]);
+    wireProjectLinks($('#pj-body'));
+  }
+
+  // ---- Project panel
+  function newProject(roomIds) {
+    const r = roomIds.length === 1 ? S.rooms.find(x => x.RoomID === roomIds[0]) : null;
+    S.pj.draft = { ProjectID: '', Title: r ? roomName(r) + ' A/V System Upgrade' : '', Phase: 'Consultation', Rooms: roomIds.join(', '), 'Ticket ID': '',
+      'Project Type': 'Complete Upgrade', 'Funding Source': '', 'STF Year': '', Amount: '', 'Proposed Install': '', Department: r ? r.Department || '' : '', Notes: '' };
+    S.pj.open = null; S.pj.editing = true; S.pj.confirm = null;
+    renderProjectPanel();
+  }
+  function openProject(id) {
+    S.pj.open = id; S.pj.draft = null; S.pj.editing = false; S.pj.confirm = null; S.pj.hist = null;
+    renderProjectPanel();
+  }
+  function closeProject() { S.pj.open = null; S.pj.draft = null; $('#overlay-root').innerHTML = ''; document.body.style.overflow = ''; }
+  function renderProjectPanel() {
+    const p = S.pj.draft || S.projects.find(x => x.ProjectID === S.pj.open);
+    if (!p) { closeProject(); return; }
+    S.open = null;
+    const isNew = !p.ProjectID;
+    const ed = S.pj.editing;
+    const field = (f, kind) => {
+      const v = p[f] == null ? '' : p[f];
+      if (kind === 'select') { const opts = f === 'Project Type' ? PROJECT_TYPES : FUNDING; return `<select id="pf-${f.replace(/\W/g, '')}"><option value=""></option>${opts.concat(has(v) && !opts.includes(v) ? [v] : []).map(o => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`; }
+      if (kind === 'area') return `<textarea id="pf-${f.replace(/\W/g, '')}">${esc(v)}</textarea>`;
+      return `<input id="pf-${f.replace(/\W/g, '')}" value="${esc(v)}" ${f === 'STF Year' ? 'placeholder="FY27"' : f === 'Amount' ? 'inputmode="decimal" placeholder="0"' : ''}>`;
+    };
+    const kinds = { 'Project Type': 'select', 'Funding Source': 'select', Notes: 'area' };
+    const show = (f, v) => `<div class="row"><span class="k">${esc(f)}</span><span class="v ${has(v) ? '' : 'none'}">${has(v) ? v : 'Not recorded'}</span></div>`;
+    const details = ed
+      ? `<div class="pj-form">${PJ_FIELDS.map(f => `<label>${esc(f)}${field(f, kinds[f])}</label>`).join('')}
+          ${!isNew ? `<details class="pj-dates"><summary>Phase dates</summary>${PHASES.concat('Cancelled').map(ph => `<label>${esc(ph)} on<input type="date" id="pd-${ph.replace(/\W/g, '')}" value="${esc(phaseDate(p, ph))}"></label>`).join('')}</details>` : ''}
+          <div style="display:flex;gap:8px;margin-top:6px"><button class="btn primary small" id="pf-save">${isNew ? 'Create project' : 'Save'}</button><button class="btn small" id="pf-x">Cancel</button></div></div>`
+      : PJ_FIELDS.map(f => show(f, f === 'Ticket ID' ? ticketLink(p) : f === 'Amount' ? esc(money(p.Amount)) : esc(p[f]))).join('')
+        + `<button class="btn small" id="pf-edit" style="margin-top:8px">Edit details</button>`;
+    const rooms = projRooms(p);
+    const confirm = S.pj.confirm === 'Completed' ? `<div class="warn-box"><b>Mark this project completed?</b>
+        <label style="display:block;margin:8px 0">Completed on <input type="date" id="pc-date" value="${new Date().toISOString().slice(0, 10)}"></label>
+        ${rooms.length ? `Each linked room (${rooms.length}) gets its <b>Latest Update</b> and <b>Equipment Info As Of</b> set from this date, and its planned-upgrade fields cleared.` : 'No rooms are linked, so no room records change.'}
+        <span style="display:flex;gap:8px;margin-top:8px"><button class="btn primary small" id="pc-yes">Mark completed</button><button class="btn small" id="pc-no">Cancel</button></span></div>`
+      : S.pj.confirm === 'Cancelled' ? `<div class="warn-box"><b>Cancel this project?</b> It leaves the board and its rooms go back to their normal refresh status. You can reopen it later.
+        <span style="display:flex;gap:8px;margin-top:8px"><button class="btn danger small" id="pc-yes">Cancel project</button><button class="btn small" id="pc-no">Keep it</button></span></div>`
+      : S.pj.confirm === 'delete' ? `<div class="warn-box"><b>Delete this project permanently?</b> This can't be undone from the website. Its change history stays in the ChangeLog tab.
+        <span style="display:flex;gap:8px;margin-top:8px"><button class="btn danger small" id="pc-yes">Yes, delete</button><button class="btn small" id="pc-no">Keep it</button></span></div>` : '';
+    $('#overlay-root').innerHTML = `<div class="overlay" id="overlay"><aside class="panel pj-panel" role="dialog" aria-modal="true" aria-label="Project">
+      <div class="panel-head"><button class="panel-close" id="close" aria-label="Close">×</button>
+        <div class="panel-title" style="font-size:22px">${isNew ? 'New project' : esc(p.Title)}</div>
+        <div class="panel-sub">${isNew ? 'Fill in what you know; everything can be changed later.' : `${esc(p.Phase)}${lastPhaseDate(p) ? ' since ' + esc(lastPhaseDate(p)) : ''}${has(p['Ticket ID']) ? ' · TeamDynamix ' : ''}`}${isNew ? '' : ticketLink(p)}</div></div>
+      <div class="panel-body">
+        <div class="section-title">Phase</div>
+        ${stepper(p, true)}
+        <p class="cat-note" style="margin:2px 0 0">Click a phase to move the project there. Dates are filled in automatically and can be changed under Edit details.</p>
+        ${p.Phase === 'Cancelled' ? '<div class="note arch"><div><b>Cancelled</b>This project is off the board.</div></div>' : ''}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 4px">${!isNew && p.Phase !== 'Cancelled' && p.Phase !== 'Completed' ? '<button class="btn small" id="pj-cancel">Cancel project</button>' : ''}
+          ${!isNew && (p.Phase === 'Cancelled' || p.Phase === 'Completed') ? '<span class="cat-note" style="margin:0">Click a phase above to reopen it.</span>' : ''}</div>
+        ${confirm}
+        <div class="section-title">Rooms</div>
+        <div class="chips">${rooms.map(id => `<span class="room-chip"><button class="model-link" data-openroom="${esc(id)}">${esc(roomLabelById(id))}</button><button class="x" data-unlink="${esc(id)}" aria-label="Remove ${esc(roomLabelById(id))}">×</button></span>`).join('') || '<span class="cat-note" style="margin:0">No rooms linked yet.</span>'}</div>
+        <div class="inline-form" style="margin-top:8px"><label style="flex:1 1 240px">Add a room<input id="pj-addroom" list="pj-rooms" placeholder="Type building and room"></label>
+          <datalist id="pj-rooms">${S.rooms.filter(r => !rooms.includes(r.RoomID)).map(r => `<option value="${esc(roomName(r))}">`).join('')}</datalist>
+          <button class="btn small" id="pj-addroom-btn" type="button">Add</button></div>
+        <div class="section-title">Details</div>${details}
+        ${isNew ? '' : '<div class="section-title">History</div><div id="pj-hist"><div class="loading">Loading history…</div></div>'}
+      </div>
+      ${!isNew && S.role === 'Admin' ? '<div class="save-bar"><span></span><button class="btn danger small" id="pj-del">Delete project</button></div>' : ''}
+    </aside></div>`;
+    document.body.style.overflow = 'hidden';
+    $('#close').onclick = closeProject;
+    $('#overlay').onclick = e => { if (e.target.id === 'overlay') closeProject(); };
+    const read = () => {
+      const out = Object.assign({}, p);
+      if (ed) PJ_FIELDS.forEach(f => { const el = $('#pf-' + f.replace(/\W/g, '')); if (el) out[f] = el.value.trim(); });
+      if (ed) PHASES.concat('Cancelled').forEach(ph => { const el = $('#pd-' + ph.replace(/\W/g, '')); if (el) out[ph + ' On'] = el.value; });
+      if (has(out.Amount)) out.Amount = String(out.Amount).replace(/[$,]/g, '');
+      if (has(out['STF Year'])) { const m = /(\d{2})\s*$/.exec(out['STF Year']); if (/^(fy|stf)?\s*\d{2}$/i.test(out['STF Year'].trim()) && m) out['STF Year'] = 'FY' + m[1]; }
+      return out;
+    };
+    const save = async (proj, extra) => {
+      if (!has(proj.Title)) { toast('Give the project a title', true); return; }
+      if (proj.ProjectID === '' && S.pj.draft) { S.pj.draft = proj; }
+      try {
+        const d = await api('saveProject', Object.assign({ project: proj }, extra || {}));
+        S.projects = d.projects;
+        (d.rooms || []).forEach(nr => { const r = S.rooms.find(x => x.RoomID === nr.RoomID); if (r) Object.assign(r, nr); });
+        S.pj.open = d.project.ProjectID; S.pj.draft = null; S.pj.editing = false; S.pj.confirm = null;
+        toast(d.rooms && d.rooms.length ? `Project saved · ${d.rooms.length} room${d.rooms.length === 1 ? '' : 's'} updated` : 'Project saved');
+        if (S.page === 'projects') renderProjects(); else if (S.page === 'reports') renderReports(); else renderRooms();
+        renderProjectPanel();
+      } catch (e) { toast(e.message, true); }
+    };
+    // phase clicks
+    $$('[data-phase]').forEach(b => b.onclick = () => {
+      const ph = b.dataset.phase;
+      if (isNew || S.pj.draft) { p.Phase = ph; S.pj.draft = Object.assign(read(), { Phase: ph }); renderProjectPanel(); return; }
+      if (ph === p.Phase) return;
+      if (ph === 'Completed') { S.pj.confirm = 'Completed'; renderProjectPanel(); return; }
+      const out = read(); out.Phase = ph; save(out);
+    });
+    if ($('#pj-cancel')) $('#pj-cancel').onclick = () => { S.pj.confirm = 'Cancelled'; renderProjectPanel(); };
+    if ($('#pj-del')) $('#pj-del').onclick = () => { S.pj.confirm = 'delete'; renderProjectPanel(); };
+    if ($('#pc-no')) $('#pc-no').onclick = () => { S.pj.confirm = null; renderProjectPanel(); };
+    if ($('#pc-yes')) $('#pc-yes').onclick = async () => {
+      const c = S.pj.confirm;
+      if (c === 'delete') {
+        try { S.projects = (await api('deleteProject', { projectId: p.ProjectID })).projects; toast('Project deleted'); closeProject(); if (S.page === 'projects') renderProjects(); }
+        catch (e) { toast(e.message, true); }
+        return;
+      }
+      const out = read(); out.Phase = c;
+      if (c === 'Completed') out['Completed On'] = $('#pc-date').value || new Date().toISOString().slice(0, 10);
+      save(out);
+    };
+    // rooms
+    const addRoom = () => {
+      const v = $('#pj-addroom').value.trim().toLowerCase(); if (!v) return;
+      const r = S.rooms.find(x => roomName(x).toLowerCase() === v);
+      if (!r) { toast('Pick a room from the list', true); return; }
+      const out = read(); out.Rooms = rooms.concat(r.RoomID).join(', ');
+      if (isNew) { S.pj.draft = out; renderProjectPanel(); return; }
+      save(out);
+    };
+    $('#pj-addroom-btn').onclick = addRoom;
+    $('#pj-addroom').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); addRoom(); } };
+    $$('[data-unlink]').forEach(b => b.onclick = () => {
+      const out = read(); out.Rooms = rooms.filter(x => x !== b.dataset.unlink).join(', ');
+      if (isNew) { S.pj.draft = out; renderProjectPanel(); return; }
+      save(out);
+    });
+    $$('[data-openroom]').forEach(b => b.onclick = () => { const r = S.rooms.find(x => x.RoomID === b.dataset.openroom); S.pj.open = null; openRoom(r); });
+    // details
+    if ($('#pf-edit')) $('#pf-edit').onclick = () => { S.pj.editing = true; renderProjectPanel(); };
+    if ($('#pf-x')) $('#pf-x').onclick = () => { if (isNew) { closeProject(); return; } S.pj.editing = false; renderProjectPanel(); };
+    if ($('#pf-save')) $('#pf-save').onclick = () => { const out = read(); if (isNew && out.Phase === 'Completed') out['Completed On'] = out['Completed On'] || new Date().toISOString().slice(0, 10); save(out); };
+    // history
+    if (!isNew) (async () => {
+      try {
+        const d = await api('projectHistory', { projectId: p.ProjectID });
+        if (S.pj.open !== p.ProjectID || !$('#pj-hist')) return;
+        $('#pj-hist').innerHTML = d.history.length ? d.history.map(h => `<div class="history-item"><span class="who">${esc(h.User)}</span><span class="when">${esc(h.Timestamp)}</span>
+          <div class="what">${esc(h.Action)}${has(h.Field) ? ' · ' + esc(h.Field) : ''}${has(h['Old Value']) || has(h['New Value']) ? `: ${esc(h['Old Value'] || '—')} → ${esc(h['New Value'] || '—')}` : ''}</div></div>`).join('')
+          : '<div class="note">No changes recorded on this site yet.' + (p['Created By'] === 'Imported' ? ' This project was imported from the Project Master Sheet.' : '') + '</div>';
+      } catch (e) { $('#pj-hist').innerHTML = `<div class="note">${esc(e.message)}</div>`; }
+    })();
+  }
+
   // ------------------------------------------------------------------ users page
   async function renderUsers() {
-    const main = $('#main');
+    const main = subHost();
     if (!S.users) {
       main.innerHTML = '<div class="loading">Loading users…</div>';
       try { S.users = (await api('listUsers')).users; } catch (e) { main.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     }
-    const roles = ['Admin', 'Technician', 'Student'];
+    const roles = ['Admin', 'Technician', 'Viewer', 'Student'];
     const row = (u, i) => S.userEditing === i
       ? `<tr><td><input id="ue-email" value="${esc(u.Email)}" aria-label="Email"></td><td><input id="ue-name" value="${esc(u.Name)}" aria-label="Name"></td>
-          <td><select id="ue-role" aria-label="Role">${roles.map(r => `<option ${u.Role === r ? 'selected' : ''}>${r}</option>`).join('')}</select></td>
+          <td><select id="ue-role" aria-label="Role">${roles.map(r => `<option value="${r}" ${u.Role === r ? 'selected' : ''}>${roleLabel(r)}</option>`).join('')}</select></td>
           <td><select id="ue-active" aria-label="Active"><option ${u.Active !== 'No' ? 'selected' : ''}>Yes</option><option ${u.Active === 'No' ? 'selected' : ''}>No</option></select></td>
           <td class="act"><button class="btn primary small" id="ue-save">Save</button> <button class="btn small" id="ue-x">Cancel</button></td></tr>`
-      : `<tr style="${u.Active === 'No' ? 'opacity:.55' : ''}"><td>${esc(u.Email)}</td><td>${esc(u.Name)}</td><td>${esc(u.Role)}</td><td>${u.Active === 'No' ? 'No' : 'Yes'}</td>
+      : `<tr style="${u.Active === 'No' ? 'opacity:.55' : ''}"><td>${esc(u.Email)}</td><td>${esc(u.Name)}</td><td>${esc(roleLabel(u.Role))}</td><td>${u.Active === 'No' ? 'No' : 'Yes'}</td>
           <td class="act"><button class="btn small" data-ue="${i}">Edit</button></td></tr>`;
     const list = S.users.slice();
     if (S.userEditing === 'new') list.push({ Email: '', Name: '', Role: 'Student', Active: 'Yes', _new: true });
@@ -747,7 +1146,7 @@
   }
 
   // ------------------------------------------------------------------ boot
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.open && !S.editField && S.eqEdit == null && !S.eqAdding) closePanel(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.pj.open && !S.pj.editing) { closeProject(); return; } if (e.key === 'Escape' && S.open && !S.editField && S.eqEdit == null && !S.eqAdding) closePanel(); });
   (async function boot() {
     if (!DEMO) {
       let t = null; try { t = sessionStorage.getItem('idToken'); } catch (e) {}
