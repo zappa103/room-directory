@@ -1,0 +1,113 @@
+/* Optional "bold" theme — a color experiment that ignores the UGA style guide.
+   To try it on the live site, add this line in index.html right after styles.css:
+     <link rel="stylesheet" href="theme-bold.css">
+   Remove the line to go back. Nothing else changes. */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+:root{
+  --ink:#17142E; --muted:#6B6790; --paper:#F4F2FB; --card:#FFFFFF; --gray-card:#ECEAF6;
+  --brass:#6D28D9; --brass-light:#7C3AED; --on-accent:#FFFFFF;
+  --blueprint:#17153B; --on-blueprint:#FFFFFF; --on-blueprint-dim:#C4C0EA;
+  --good:#0D9488; --bad:#E11D48; --neutral:#7C7896;
+  --line:#E4E1F2; --line-strong:#C9C4E4; --col-bg:#ECE9F8; --side-bg:#17153B;
+  --font-display:'Plus Jakarta Sans',system-ui,sans-serif; --font-body:'Plus Jakarta Sans',system-ui,sans-serif;
+  --grad:linear-gradient(120deg,#4F46E5 0%,#7C3AED 45%,#DB2777 100%);
+  --grad-soft:linear-gradient(120deg,#EEF2FF,#FAE8FF);
+  --shadow:0 1px 2px rgba(30,20,80,.06),0 6px 18px rgba(60,40,140,.08);
+  --shadow-hover:0 4px 10px rgba(30,20,80,.10),0 16px 34px rgba(90,50,180,.16);
+  /* vivid phase colors, in order */
+  --ph-1:#A78BFA; --ph-2:#60A5FA; --ph-3:#22D3EE; --ph-4:#34D399; --ph-5:#FBBF24; --ph-6:#F43F5E; --ph-7:#17153B; --ph-x:#A8A5C0;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --ink:#ECEAFB; --muted:#A9A5CC; --paper:#0F0D24; --card:#1A1738; --gray-card:#211E44; --line:#2C2858; --line-strong:#433E7A;
+  --col-bg:#171433; --side-bg:#0B0A1C; --ph-7:#E8E6FA; --brass:#A78BFA; --brass-light:#C4B5FD;
+}}
+body{background:radial-gradient(1200px 500px at 85% -10%,rgba(219,39,119,.10),transparent 60%),radial-gradient(900px 500px at 10% 0%,rgba(79,70,229,.10),transparent 60%),var(--paper);background-attachment:fixed;}
+body,button,input,select,textarea{font-family:var(--font-body);}
+
+/* header: gradient band, no red rule */
+header.band{background:var(--grad);border-bottom:0;}
+.band-title{font-weight:800;letter-spacing:-.01em;text-transform:none;}
+.role-pill{background:rgba(255,255,255,.22);border:1px solid rgba(255,255,255,.4);border-radius:999px;}
+.demo-bar{background:#FFF7E6;border-bottom-color:#F5D08A;}
+
+/* sidebar: deep indigo with a glowing active pill */
+.sidebar{background:var(--side-bg);border-right:0;color:#E9E7FF;}
+.side-brand{color:#fff;}
+.side-mark{background:var(--grad);border-radius:12px;}
+.nav-label{color:#8F8BC4;}
+.nav-item{color:#D7D4F7;}
+.nav-item:hover{background:rgba(255,255,255,.07);}
+.nav-item.active{background:var(--grad);color:#fff;box-shadow:0 6px 18px rgba(124,58,237,.45);}
+.nav-item.active svg{color:#fff;}
+.nav-count{background:rgba(255,255,255,.14);border-color:transparent;color:#fff;}
+
+/* buttons & controls */
+.btn.primary{background:var(--grad);border:0;box-shadow:0 4px 14px rgba(124,58,237,.35);}
+.btn.primary:hover{filter:brightness(1.08);background:var(--grad);}
+.seg{background:#E6E2F7;}
+.seg-btn.active{background:var(--grad);color:#fff;box-shadow:0 4px 12px rgba(124,58,237,.35);}
+.search,.dd{border-color:var(--line);border-radius:12px;}
+.chip.active{background:var(--good);border-color:var(--good);}
+.page-head h2{font-weight:800;letter-spacing:-.02em;}
+
+/* room cards: colored top band by type */
+.plaque{border:0;border-radius:18px;padding-top:18px;position:relative;overflow:hidden;}
+.plaque::before{content:"";position:absolute;left:0;right:0;top:0;height:6px;background:linear-gradient(90deg,#14B8A6,#22D3EE);}
+.plaque:not(:has(.tag.ctl))::before{background:linear-gradient(90deg,#F43F5E,#FB923C);}
+.plaque.contact-only{background:#F1EFF8;}
+.plaque.contact-only::before{background:linear-gradient(90deg,#A8A5C0,#C9C6DC);}
+.idline{font-weight:700;}
+.tag{border:0;}
+.tag.ctl{background:#CCFBF1;color:#0F766E;}
+.tag.nonctl{background:#FFE4E6;color:#BE123C;}
+.tag.proj{background:var(--grad);color:#fff;}
+
+/* panel */
+.panel{border-left:0;}
+.panel-head{background:var(--grad);}
+.photo-btn{background:#fff;color:#6D28D9;border-radius:999px;}
+.tab.active{border-bottom-color:#7C3AED;color:#6D28D9;}
+.contact{border-radius:14px;border:0;box-shadow:var(--shadow);}
+.contact .role{color:#7C3AED;}
+.contact.ctl-contact{border-left:4px solid #14B8A6;}
+
+/* overview: tinted tiles */
+.ov-tile{border:0;color:#fff;}
+.ov-tile .ov-label,.ov-tile .ov-sub,.ov-tile .ov-num{color:#fff;}
+.ov-tile .ov-sub .up,.ov-tile .ov-sub .down{color:#fff;}
+.ov-tiles .ov-tile:nth-child(1){background:linear-gradient(135deg,#4F46E5,#7C3AED);}
+.ov-tiles .ov-tile:nth-child(2){background:linear-gradient(135deg,#0D9488,#22D3EE);}
+.ov-tiles .ov-tile:nth-child(3){background:linear-gradient(135deg,#F43F5E,#FB923C);}
+.ov-tiles .ov-tile:nth-child(4){background:linear-gradient(135deg,#DB2777,#A855F7);}
+.ov-card{border:0;border-radius:18px;}
+.ov-card-head h3{font-weight:700;}
+.link-more{color:#7C3AED;}
+.hbar{background:var(--grad);}
+.progress span{background:linear-gradient(90deg,#14B8A6,#22D3EE);}
+.vbar{background:linear-gradient(180deg,#A78BFA,#7C3AED);}
+.vbar-col.cur .vbar{background:linear-gradient(180deg,#F472B6,#DB2777);}
+
+/* board: each column tinted with its phase color */
+.col{border-radius:18px;background:color-mix(in srgb,var(--ph,#ECE9F8) 14%,var(--paper));}
+.col[data-drop="Consultation"]{--ph:var(--ph-1);} .col[data-drop="Funding Requested"]{--ph:var(--ph-2);} .col[data-drop="Funded"]{--ph:var(--ph-3);}
+.col[data-drop="Equipment Ordered"]{--ph:var(--ph-4);} .col[data-drop="Equipment Received"]{--ph:var(--ph-5);} .col[data-drop="Active"]{--ph:var(--ph-6);}
+.col-done{background:transparent;border-color:#C4B5FD;}
+h3.col-head{font-weight:800;}
+.pj-card{border:0;border-radius:12px;}
+.pj-card.compact{border-left:5px solid var(--ph);}
+.phase-chip{font-weight:700;}
+.ph-consultation,.ph-funding-requested,.ph-funded,.ph-equipment-ordered,.ph-equipment-received{--ph-ink:#17142E;}
+
+/* tables, reports, catalog */
+.card-table,details.rp-sec,details.cat-section,section.zone{border:0;border-radius:18px;}
+table.t th{color:#6D28D9;}
+a.tdx{color:#7C3AED;}
+.preview-bar{background:linear-gradient(90deg,#FEF3C7,#FCE7F3);}
+
+/* header title, bold theme: lighter and calmer than the big gradient headline */
+header.band{padding-top:calc(16px + env(safe-area-inset-top,0px));padding-bottom:16px;}
+.band-mark{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);backdrop-filter:blur(6px);box-shadow:0 6px 18px rgba(30,10,80,.25);}
+.band-eyebrow{color:rgba(255,255,255,.75);}
+.band-title{font-weight:600;font-size:clamp(18px,2.1vw,22px);letter-spacing:-.005em;}
+.band-sub{color:rgba(255,255,255,.75);}

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>CTL Campus Room Directory</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500&family=Merriweather+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="theme-bold.css"><!-- colorful theme; delete this line for the plain UGA-style look -->
+</head>
+<body>
+<div class="app">
+<aside class="sidebar" id="sidebar" hidden aria-label="Main menu"></aside>
+<div class="sidebar-scrim" id="scrim"></div>
+<div class="app-main">
+<header class="band">
+  <div class="band-top">
+    <button class="menu-btn" id="menu-btn" aria-label="Open menu" hidden><span></span><span></span><span></span></button>
+    <span class="band-mark" id="band-mark" aria-hidden="true"></span>
+    <div class="band-titles">
+      <p class="band-eyebrow" id="site-eyebrow"></p>
+      <p class="band-title" id="site-title">Campus Room Directory</p>
+      <p class="band-sub" id="site-sub">Classrooms and support contacts</p>
+    </div>
+    <div class="account" id="account"></div>
+  </div>
+  <nav class="page-tabs" id="page-tabs" hidden></nav>
+</header>
+<div class="demo-bar" id="demo-bar" hidden></div>
+<main id="main"><div class="loading">Loading rooms…</div></main>
+</div>
+</div>
+<div id="overlay-root"></div>
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<div id="toast-root"></div>
+
+<script src="config.js"></script>
+<script src="demo-data.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="app.js"></script>
+</body>
+</html>
